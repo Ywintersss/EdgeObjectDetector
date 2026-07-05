@@ -5,6 +5,8 @@ with tiny in-memory numpy arrays.
 """
 from __future__ import annotations
 
+import random
+
 import numpy as np
 
 
@@ -37,3 +39,31 @@ def mask_to_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
     if xs.size == 0:
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+class ClassBalancedSampler:
+    """Draw (class_id, item) picks, always preferring the least-used class.
+
+    Keeps per-class draw counts so that across a whole generation run every class
+    appears a similar number of times, even when the cut-out library is skewed.
+    """
+
+    def __init__(self, class_to_items: dict[int, list[str]], seed: int = 0):
+        if not class_to_items:
+            raise ValueError("class_to_items must not be empty")
+        self._pool = {c: list(items) for c, items in class_to_items.items() if items}
+        if not self._pool:
+            raise ValueError("every class had an empty item list")
+        self._counts = {c: 0 for c in self._pool}
+        self._rng = random.Random(seed)
+
+    def sample(self, k: int) -> list[tuple[int, str]]:
+        picks: list[tuple[int, str]] = []
+        for _ in range(k):
+            min_count = min(self._counts.values())
+            candidates = [c for c, n in self._counts.items() if n == min_count]
+            cls = self._rng.choice(candidates)
+            item = self._rng.choice(self._pool[cls])
+            self._counts[cls] += 1
+            picks.append((cls, item))
+        return picks
