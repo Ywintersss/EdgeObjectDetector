@@ -1,0 +1,32 @@
+# --- Large data trees (never commit; multi-GB) ---
+dataset/
+dataset_640/
+dataset_640_trial/
+coco_converted/
+coco_converted-2/
+yolo_format/
+instances_*.json
+
+# --- Generated pipeline artifacts ---
+cutouts/
+cutouts_trial/
+backgrounds/
+backgrounds_trial/
+dataset_synth/
+dataset_synth_trial/
+
+# --- Training outputs & model weights ---
+runs/
+*.pt
+*.tflite
+*.onnx
+
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- SDD scratch ---
+.superpowers/
