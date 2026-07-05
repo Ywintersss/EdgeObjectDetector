@@ -1,5 +1,6 @@
 import random
 import numpy as np
+import synth_utils
 from compose_scenes import make_background, compose_one
 
 
@@ -41,3 +42,19 @@ def test_fully_occluded_object_is_dropped():
     rows = compose_one(canvas, [small, big], rng, drop_thresh=0.5)
     surviving_classes = {r[0] for r in rows}
     assert 2 in surviving_classes
+
+
+def test_fully_overwritten_owner_has_near_zero_visibility():
+    # Deterministic case bypassing random placement: object 0 occupies a 10x10
+    # region entirely, then object 1 fully overwrites that same region on the
+    # owner map (as alpha_paste would when pasted on top and fully opaque).
+    owner_map = np.full((20, 20), -1, dtype=np.int32)
+    owner_map[0:10, 0:10] = 0        # object 0 initially "owns" a 10x10 block
+    owner_map[0:10, 0:10] = 1        # object 1 pastes on top, fully overwriting it
+    owner_map[10:20, 10:20] = 1      # object 1 also owns a separate untouched block
+    total_pixels = {0: 100, 1: 200}  # object 0 had 100 px total; object 1 had 200 px
+
+    vis = synth_utils.compute_visibilities(owner_map, total_pixels)
+
+    assert vis[0] < 0.15   # object 0 fully occluded -> below drop threshold
+    assert vis[1] == 1.0   # object 1 fully visible

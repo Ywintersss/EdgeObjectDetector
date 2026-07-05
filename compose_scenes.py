@@ -10,6 +10,7 @@ import random
 import shutil
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -38,7 +39,7 @@ def make_background(bg_tiles, size, rng):
     return cv2.GaussianBlur(canvas, (5, 5), 0)
 
 
-def _scale_rgba(bgra, target_side, rng, min_scale, max_scale, canvas_size):
+def _scale_rgba(bgra, rng, min_scale, max_scale, canvas_size):
     """Scale a cut-out so its longest side is a random fraction of the canvas."""
     frac = rng.uniform(min_scale, max_scale)
     target = max(8, int(canvas_size * frac))
@@ -57,7 +58,7 @@ def compose_one(canvas, cutouts, rng, min_scale=0.15, max_scale=0.40,
     placed = []          # (owner_id, class_id, x1,y1,x2,y2, total_pixels)
     total_pixels = {}
     for oid, (cid, bgra) in enumerate(cutouts):
-        scaled = _scale_rgba(bgra, None, rng, min_scale, max_scale, size)
+        scaled = _scale_rgba(bgra, rng, min_scale, max_scale, size)
         angle = rng.uniform(-25, 25)
         rot = rotate_rgba(scaled, angle)
         oh, ow = rot.shape[:2]
@@ -108,6 +109,45 @@ def _load_names_block(dataset_yml: Path):
     return block
 
 
+# Populated once per worker process by _init_worker; holds decoded background tiles
+# so the (potentially large) arrays aren't re-pickled for every job.
+_WORKER_BG_TILES = None
+
+
+def _init_worker(bg_paths):
+    """Pool initializer: load background tiles once per worker process."""
+    global _WORKER_BG_TILES
+    tiles = [cv2.imread(str(p)) for p in bg_paths]
+    _WORKER_BG_TILES = [t for t in tiles if t is not None]
+
+
+def _compose_worker(job):
+    """Run one scene end-to-end in a worker process. Never raises."""
+    try:
+        i, picks, scene_seed, size, img_out, lbl_out = job
+        worker_rng = random.Random(scene_seed)
+        cutouts = []
+        for cid, path in picks:
+            bgra = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if bgra is not None and bgra.ndim == 3 and bgra.shape[2] == 4:
+                cutouts.append((cid, bgra))
+        if not cutouts:
+            return ("ok", None, 0)
+        canvas = make_background(_WORKER_BG_TILES, size, worker_rng)
+        rows = compose_one(canvas, cutouts, worker_rng)
+        if not rows:
+            return ("ok", None, 0)
+        stem = f"synth_{i:06d}"
+        cv2.imwrite(str(Path(img_out) / f"{stem}.jpg"), canvas,
+                    [cv2.IMWRITE_JPEG_QUALITY, 90])
+        (Path(lbl_out) / f"{stem}.txt").write_text(
+            "\n".join(f"{c} {x:.6f} {y:.6f} {w:.6f} {h:.6f}" for c, x, y, w, h in rows)
+            + "\n")
+        return ("ok", stem, len(rows))
+    except Exception as exc:  # noqa: BLE001 - a single bad cut-out must not kill the run
+        return ("error", str(exc))
+
+
 def main():
     args = parse_args()
     root = PROJECT_ROOT
@@ -115,14 +155,14 @@ def main():
     bg_root = (root / args.backgrounds)
     out_root = (root / args.out)
     rng = random.Random(args.seed)
+    workers = args.workers if args.workers > 0 else max(1, os.cpu_count())
 
     index = _load_cutout_index(cutouts_root)
     if not index:
         print(f"ERROR: no cut-outs under {cutouts_root}", file=sys.stderr)
         return 1
-    bg_tiles = [cv2.imread(str(p)) for p in sorted(bg_root.glob("*.png"))]
-    bg_tiles = [t for t in bg_tiles if t is not None]
-    if not bg_tiles:
+    bg_paths = sorted(bg_root.glob("*.png"))
+    if not bg_paths:
         print(f"ERROR: no backgrounds under {bg_root}", file=sys.stderr)
         return 1
 
@@ -131,35 +171,35 @@ def main():
     img_out.mkdir(parents=True, exist_ok=True)
     lbl_out.mkdir(parents=True, exist_ok=True)
 
+    # Sampling stays sequential so ClassBalancedSampler remains deterministic/balanced.
     sampler = ClassBalancedSampler(index, seed=args.seed)
+    jobs = []
     for i in range(args.num):
         k = rng.randint(args.min_objs, args.max_objs)
         picks = sampler.sample(k)
-        cutouts = []
-        for cid, path in picks:
-            bgra = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if bgra is not None and bgra.ndim == 3 and bgra.shape[2] == 4:
-                cutouts.append((cid, bgra))
-        if not cutouts:
-            continue
-        canvas = make_background(bg_tiles, args.size, rng)
-        rows = compose_one(canvas, cutouts, rng)
-        if not rows:
-            continue
-        stem = f"synth_{i:06d}"
-        cv2.imwrite(str(img_out / f"{stem}.jpg"), canvas,
-                    [cv2.IMWRITE_JPEG_QUALITY, 90])
-        (lbl_out / f"{stem}.txt").write_text(
-            "\n".join(f"{c} {x:.6f} {y:.6f} {w:.6f} {h:.6f}" for c, x, y, w, h in rows)
-            + "\n")
-        if (i + 1) % 2000 == 0:
-            print(f"  {i + 1}/{args.num} scenes")
+        scene_seed = rng.randint(0, 2**31 - 1)
+        jobs.append((i, picks, scene_seed, args.size, str(img_out), str(lbl_out)))
+
+    ok_count = 0
+    error_count = 0
+    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
+                             initargs=(bg_paths,)) as pool:
+        for n_done, result in enumerate(pool.map(_compose_worker, jobs), start=1):
+            if result[0] == "ok":
+                ok_count += 1
+            else:
+                error_count += 1
+                print(f"  ERROR: {result[1]}", file=sys.stderr)
+            if n_done % 2000 == 0:
+                print(f"  {n_done}/{args.num} scenes")
+    print(f"{ok_count} scenes, {error_count} errors")
 
     _mix_single_items(root, out_root, args.single_item_frac, rng)
     _link_val(root, out_root)
     names_block = _load_names_block(root / "dataset.yml")
-    write_synth_yaml(out_root, names_block, root / "dataset_synth.yml")
-    print(f"Done. Synthetic dataset at {out_root}; yaml at dataset_synth.yml")
+    yaml_path = PROJECT_ROOT / f"{out_root.name}.yml"
+    write_synth_yaml(out_root, names_block, yaml_path)
+    print(f"Done. Synthetic dataset at {out_root}; yaml at {yaml_path.name}")
     return 0
 
 
@@ -204,6 +244,8 @@ def parse_args():
     p.add_argument("--single-item-frac", type=float, default=0.1)
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--workers", type=int, default=0,
+                  help="Worker processes; 0 = use all CPU cores")
     return p.parse_args()
 
 
