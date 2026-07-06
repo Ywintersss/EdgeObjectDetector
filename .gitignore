@@ -15,6 +15,7 @@ backgrounds_trial/
 dataset_synth/
 dataset_synth_trial/
 dataset_synth*.yml
+dataset_synth_coarse/
 
 # --- Training outputs & model weights ---
 runs/
