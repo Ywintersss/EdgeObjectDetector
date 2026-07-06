@@ -109,3 +109,70 @@ def test_write_coarse_yaml_has_17_style_shape(tmp_path):
     assert doc["train"] == "images/train" and doc["val"] == "images/val"
     assert doc["names"] == {0: "alcohol", 1: "candy", 2: "tissue"}
     assert Path(doc["path"]) == out_root
+
+
+from remap_to_coarse import link_images
+
+
+def test_link_images_file_is_reachable_with_matching_content(tmp_path):
+    src_images = tmp_path / "dataset_synth" / "images"
+    dst_images = tmp_path / "dataset_synth_coarse" / "images"
+    _write(src_images / "train" / "x.jpg", "fake-jpeg-bytes")
+
+    link_images(src_images, dst_images)
+
+    linked = dst_images / "train" / "x.jpg"
+    assert linked.exists()
+    assert linked.read_text(encoding="utf-8") == "fake-jpeg-bytes"
+
+
+def test_link_images_resolve_does_not_escape_dst_tree(tmp_path):
+    """Regression test for the silent-corruption bug.
+
+    If link_images ever goes back to symlinking/junctioning the whole
+    images/ directory (instead of per-file hardlinks), dst_images becomes a
+    reparse point and Path.resolve() on a file inside it collapses back to
+    the ORIGINAL src_images location. Ultralytics does its "/images/" ->
+    "/labels/" swap on the *resolved* path, so that regression would make
+    training silently read the wrong (200-class) label tree instead of the
+    new coarse one. This assertion is the one that would fail on that
+    regression: the resolved path of a linked file must stay under the
+    resolved dst_images root, not collapse back into src_images.
+    """
+    src_images = tmp_path / "dataset_synth" / "images"
+    dst_images = tmp_path / "dataset_synth_coarse" / "images"
+    _write(src_images / "train" / "x.jpg", "fake-jpeg-bytes")
+
+    link_images(src_images, dst_images)
+
+    resolved_linked = (dst_images / "train" / "x.jpg").resolve()
+    resolved_dst_root = dst_images.resolve()
+    resolved_src_root = src_images.resolve()
+
+    assert resolved_dst_root in resolved_linked.parents
+    assert resolved_src_root not in resolved_linked.parents
+
+
+def test_link_images_hardlinks_share_inode_when_supported(tmp_path):
+    src_images = tmp_path / "dataset_synth" / "images"
+    dst_images = tmp_path / "dataset_synth_coarse" / "images"
+    _write(src_images / "train" / "x.jpg", "fake-jpeg-bytes")
+
+    link_images(src_images, dst_images)
+
+    src_ino = os.stat(src_images / "train" / "x.jpg").st_ino
+    dst_ino = os.stat(dst_images / "train" / "x.jpg").st_ino
+    if src_ino == 0 or dst_ino == 0:
+        pytest.skip("st_ino not supported on this filesystem")
+    assert src_ino == dst_ino  # zero-copy hardlink, not a duplicated file
+
+
+def test_link_images_is_noop_when_dst_already_exists(tmp_path):
+    src_images = tmp_path / "dataset_synth" / "images"
+    dst_images = tmp_path / "dataset_synth_coarse" / "images"
+    _write(src_images / "train" / "x.jpg", "fake-jpeg-bytes")
+    dst_images.mkdir(parents=True)  # pre-existing dst -> link_images must no-op, not raise
+
+    link_images(src_images, dst_images)  # should not raise
+
+    assert not (dst_images / "train").exists()
