@@ -14,7 +14,6 @@ Usage:
 import re
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -82,18 +81,34 @@ def remap_tree(src_labels: Path, dst_labels: Path,
 
 
 def link_images(src_images: Path, dst_images: Path) -> None:
-    """Make dst_images resolve to src_images without copying (symlink; junction fallback)."""
+    """Populate dst_images/<split>/* as per-file hardlinks to src_images/<split>/* (no copy).
+
+    IMPORTANT: this links individual files, not the whole images/ directory. Ultralytics
+    resolves dataset paths with Path.resolve() before doing its "/images/" -> "/labels/"
+    swap (see check_det_dataset). If dst_images (or a split subdir) were itself a
+    symlink/junction, that resolve() would collapse the path back to the ORIGINAL
+    src_images location, and the swap would silently land on the ORIGINAL 200-way
+    label directory instead of the coarse one -- no error, just wrong labels loaded.
+    Per-file hardlinks keep every path component under dst_images a real directory
+    (no reparse point), so resolve() leaves it alone and the swap lands on the coarse
+    labels as intended. Hardlinks need no copy and no admin/Developer Mode rights as
+    long as source and destination are on the same volume.
+    """
     src_images = Path(src_images)
     dst_images = Path(dst_images)
     if dst_images.exists():
         return
-    dst_images.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.symlink(src_images, dst_images, target_is_directory=True)
-    except OSError:
-        # Windows without Developer Mode: a junction needs no admin rights.
-        subprocess.run(["cmd", "/c", "mklink", "/J",
-                        str(dst_images), str(src_images)], check=True)
+    for split_dir in sorted(d for d in src_images.iterdir() if d.is_dir()):
+        dst_split = dst_images / split_dir.name
+        dst_split.mkdir(parents=True, exist_ok=True)
+        for src_file in split_dir.iterdir():
+            if not src_file.is_file():
+                continue
+            dst_file = dst_split / src_file.name
+            try:
+                os.link(src_file, dst_file)  # hardlink: same volume, zero-copy
+            except OSError:
+                os.symlink(src_file, dst_file)  # cross-volume fallback (per-file, not per-dir)
 
 
 def write_coarse_yaml(out_root: Path, coarse_names: list[str], out_path: Path) -> None:
