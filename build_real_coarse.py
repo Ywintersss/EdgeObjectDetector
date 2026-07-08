@@ -55,3 +55,49 @@ def subsample(basenames, n, seed=0):
     if n >= len(pool):
         return pool
     return random.Random(seed).sample(pool, n)
+
+
+def hardlink(src, dst) -> None:
+    """Per-file hardlink src->dst (mkdir parents). Symlink fallback across volumes.
+
+    Never links a whole directory: every path component stays a real dir so
+    Ultralytics' Path.resolve() cannot collapse it back to the source labels.
+    """
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        os.symlink(src, dst)
+
+
+def materialize_split(basenames, src_images, src_labels, out_images, out_labels,
+                      old2new) -> tuple[int, int]:
+    """Hardlink each basename's image and write its coarse-remapped label.
+
+    A basename with no matching *.txt is skipped (image-only frames are ignored).
+    Returns (n_images_linked, n_labels_written).
+    """
+    src_images, src_labels = Path(src_images), Path(src_labels)
+    out_images, out_labels = Path(out_images), Path(out_labels)
+    out_images.mkdir(parents=True, exist_ok=True)
+    out_labels.mkdir(parents=True, exist_ok=True)
+    n_img = n_lbl = 0
+    for base in basenames:
+        stem = Path(base).stem
+        lbl = src_labels / f"{stem}.txt"
+        if not lbl.exists():
+            continue
+        img = src_images / f"{stem}.jpg"
+        if img.exists():
+            hardlink(img, out_images / img.name)
+            n_img += 1
+        lines = lbl.read_text(encoding="utf-8").splitlines()
+        out = "\n".join(remap_label_line(ln, old2new) for ln in lines)
+        if lines:
+            out += "\n"
+        (out_labels / f"{stem}.txt").write_text(out, encoding="utf-8")
+        n_lbl += 1
+    return n_img, n_lbl
