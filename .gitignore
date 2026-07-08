@@ -32,3 +32,9 @@ htmlcov/
 
 # --- SDD scratch ---
 .superpowers/
+
+# derived real-scene domain-adaptation artifacts (rebuildable, non-destructive)
+dataset_real/
+studio_coarse/
+dataset_real_blend.yml
+eval_single_item.yml

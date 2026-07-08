@@ -149,3 +149,85 @@ def verify_no_leak(image_dirs) -> None:
         for j in range(i + 1, len(names)):
             overlap = keyset[names[i]] & keyset[names[j]]
             assert not overlap, f"scene leak {names[i]}<->{names[j]}: {sorted(overlap)[:3]}"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Build real-scene coarse-17 blend (non-destructive).")
+    p.add_argument("--test-json", default="instances_test2019.json")
+    p.add_argument("--test-images", default="dataset/images/test")
+    p.add_argument("--out", default="dataset_real")
+    p.add_argument("--studio-yaml", default="dataset_640.yml")
+    p.add_argument("--studio-images", default="dataset_640/images/train")
+    p.add_argument("--studio-labels", default="dataset_640/labels/train")
+    p.add_argument("--synth-coarse-images", default="dataset_synth_coarse/images/train")
+    p.add_argument("--studio-out", default="studio_coarse")
+    p.add_argument("--studio-train-n", type=int, default=10000)
+    p.add_argument("--studio-eval-n", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--verify", action="store_true")
+    p.add_argument("--dry", action="store_true", help="parse args and exit (test hook)")
+    args = p.parse_args()
+    if args.dry:
+        return 0
+
+    out = Path(args.out).resolve()
+    if out.exists():
+        print(f"{out} already exists; remove it to rebuild. Skipping.")
+        return 0
+
+    # 1) 200-class mapping derived from the json categories (matches coco_to_yolo order)
+    names = names_from_json(args.test_json)
+    old2new, coarse_names = build_coarse_mapping(names)
+    print(f"{len(names)} SKUs -> {len(coarse_names)} coarse categories")
+
+    # 2) convert test json -> flat 200-class labels in a FRESH staging dir
+    staging = out / "_staging_labels"
+    if staging.exists() and any(staging.glob("*.txt")):
+        print(f"ERROR: staging {staging} not empty; remove it and rerun.", file=sys.stderr)
+        return 1
+    staging.mkdir(parents=True, exist_ok=True)
+    coco_to_yolo(str(args.test_json), str(staging))
+
+    # 3) scene-grouped split over basenames that have a label
+    basenames = [p.stem for p in staging.glob("*.txt")]
+    parts = split_by_scene(basenames, seed=args.seed)
+    for name, bases in parts.items():
+        ni, nl = materialize_split(bases, args.test_images, staging,
+                                   out / "images" / name, out / "labels" / name, old2new)
+        print(f"  real {name}: {ni} images, {nl} labels")
+
+    # 4) studio slice (coarse) from dataset_640: disjoint train + held-out eval
+    studio_out = Path(args.studio_out).resolve()
+    if not studio_out.exists():
+        studio_bases = [p.stem for p in Path(args.studio_labels).glob("*.txt")]
+        studio_train = subsample(studio_bases, args.studio_train_n, seed=args.seed)
+        remaining = sorted(set(studio_bases) - set(studio_train))
+        studio_eval = subsample(remaining, args.studio_eval_n, seed=args.seed)
+        for name, bases in (("train", studio_train), ("eval", studio_eval)):
+            ni, nl = materialize_split(bases, args.studio_images, args.studio_labels,
+                                       studio_out / "images" / name,
+                                       studio_out / "labels" / name, old2new)
+            print(f"  studio {name}: {ni} images, {nl} labels")
+    else:
+        print(f"{studio_out} exists; reusing.")
+
+    # 5) compose yamls
+    write_blend_yaml(Path("dataset_real_blend.yml"),
+                     out / "images" / "real_ft",
+                     Path(args.synth_coarse_images),
+                     studio_out / "images" / "train",
+                     out / "images" / "real_eval",
+                     coarse_names)
+    write_single_item_yaml(Path("eval_single_item.yml"),
+                           studio_out / "images" / "eval", studio_out, coarse_names)
+    print("Wrote dataset_real_blend.yml + eval_single_item.yml")
+
+    # 6) verify (optional)
+    if args.verify:
+        verify_no_leak({k: out / "images" / k for k in ("real_ft", "real_eval", "reserve")})
+        print("VERIFY OK: no scene leak across real_ft/real_eval/reserve")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

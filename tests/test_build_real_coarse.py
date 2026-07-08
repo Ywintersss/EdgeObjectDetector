@@ -123,3 +123,13 @@ def test_verify_no_leak_raises_on_shared_scene(tmp_path):
     (b / "20181025-15-09-20-2.jpg").write_bytes(b"x")   # SAME scene key -> leak
     with pytest.raises(AssertionError):
         B.verify_no_leak({"a": a, "b": b})
+
+
+def test_main_parses_args(monkeypatch):
+    called = {}
+    monkeypatch.setattr(sys, "argv", ["build_real_coarse.py",
+                                      "--test-json", "instances_test2019.json",
+                                      "--out", "dataset_real", "--dry"])
+    # --dry short-circuits before any filesystem work
+    rc = B.main()
+    assert rc == 0
