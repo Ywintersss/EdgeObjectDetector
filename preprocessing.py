@@ -65,16 +65,17 @@ def coco_to_yolo(json_path, output_dir):
 
     print(f"Success. Saved YOLO labels to {output_dir}")
 
-# Define your exact paths
-train_json = r"D:\Projects\EdgeObjectDetector\instances_train2019.json"
-train_out = r"D:\Projects\EdgeObjectDetector\yolo_format\labels\train"
+if __name__ == "__main__":
+    # Define your exact paths
+    train_json = r"D:\Projects\EdgeObjectDetector\instances_train2019.json"
+    train_out = r"D:\Projects\EdgeObjectDetector\yolo_format\labels\train"
 
-val_json = r"D:\Projects\EdgeObjectDetector\instances_val2019.json"
-val_out = r"D:\Projects\EdgeObjectDetector\yolo_format\labels\val"
+    val_json = r"D:\Projects\EdgeObjectDetector\instances_val2019.json"
+    val_out = r"D:\Projects\EdgeObjectDetector\yolo_format\labels\val"
 
-# Run the conversions
-print("Starting Train conversion...")
-coco_to_yolo(train_json, train_out)
+    # Run the conversions
+    print("Starting Train conversion...")
+    coco_to_yolo(train_json, train_out)
 
-print("\nStarting Val conversion...")
-coco_to_yolo(val_json, val_out)
+    print("\nStarting Val conversion...")
+    coco_to_yolo(val_json, val_out)

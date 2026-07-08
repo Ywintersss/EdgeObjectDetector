@@ -38,3 +38,18 @@ def test_subsample_deterministic_and_sized():
     assert len(a) == 10
     assert a == B.subsample(names, 10, seed=0)
     assert set(a).issubset(set(names))
+
+
+def test_coco_to_yolo_importable_and_converts(tmp_path):
+    from preprocessing import coco_to_yolo
+    j = tmp_path / "mini.json"
+    j.write_text(json.dumps({
+        "categories": [{"id": 1, "name": "1_puffed_food"}, {"id": 2, "name": "2_puffed_food"}],
+        "images": [{"id": 10, "file_name": "a.jpg", "width": 100, "height": 100}],
+        "annotations": [{"image_id": 10, "category_id": 2, "bbox": [10, 20, 30, 40]}],
+    }))
+    out = tmp_path / "labels"
+    coco_to_yolo(str(j), str(out))
+    txt = (out / "a.txt").read_text().strip()
+    # category_id 2 is the 2nd category -> YOLO index 1; box normalized
+    assert txt.split()[0] == "1"
