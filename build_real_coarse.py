@@ -151,12 +151,16 @@ def verify_no_leak(image_dirs) -> None:
             assert not overlap, f"scene leak {names[i]}<->{names[j]}: {sorted(overlap)[:3]}"
 
 
+def _is_complete(out) -> bool:
+    """True once a build finished (sentinel written at the very end of main)."""
+    return (Path(out) / ".complete").exists()
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Build real-scene coarse-17 blend (non-destructive).")
     p.add_argument("--test-json", default="instances_test2019.json")
     p.add_argument("--test-images", default="dataset/images/test")
     p.add_argument("--out", default="dataset_real")
-    p.add_argument("--studio-yaml", default="dataset_640.yml")
     p.add_argument("--studio-images", default="dataset_640/images/train")
     p.add_argument("--studio-labels", default="dataset_640/labels/train")
     p.add_argument("--synth-coarse-images", default="dataset_synth_coarse/images/train")
@@ -171,8 +175,8 @@ def main() -> int:
         return 0
 
     out = Path(args.out).resolve()
-    if out.exists():
-        print(f"{out} already exists; remove it to rebuild. Skipping.")
+    if _is_complete(out):
+        print(f"{out} already built (.complete present); remove the tree to rebuild. Skipping.")
         return 0
 
     # 1) 200-class mapping derived from the json categories (matches coco_to_yolo order)
@@ -226,6 +230,9 @@ def main() -> int:
     if args.verify:
         verify_no_leak({k: out / "images" / k for k in ("real_ft", "real_eval", "reserve")})
         print("VERIFY OK: no scene leak across real_ft/real_eval/reserve")
+
+    # 7) write completion sentinel (make idempotency check reachable on re-run)
+    (out / ".complete").touch()
     return 0
 
 

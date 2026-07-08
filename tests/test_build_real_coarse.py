@@ -133,3 +133,11 @@ def test_main_parses_args(monkeypatch):
     # --dry short-circuits before any filesystem work
     rc = B.main()
     assert rc == 0
+
+
+def test_is_complete_sentinel(tmp_path):
+    out = tmp_path / "dataset_real"
+    out.mkdir()
+    assert B._is_complete(out) is False
+    (out / ".complete").touch()
+    assert B._is_complete(out) is True
