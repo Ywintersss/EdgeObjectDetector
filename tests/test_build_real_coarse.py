@@ -102,6 +102,21 @@ def test_write_blend_yaml_structure(tmp_path):
     assert doc["names"] == {0: "alcohol", 1: "candy"}
 
 
+def test_write_single_item_yaml_structure(tmp_path):
+    out = tmp_path / "single_item.yml"
+    studio_eval = tmp_path / "studio_coarse/images/eval"
+    studio_root = tmp_path / "studio_coarse"
+    B.write_single_item_yaml(out,
+                             studio_eval_images=studio_eval,
+                             studio_root=studio_root,
+                             coarse_names=["alcohol", "candy"])
+    doc = yaml.safe_load(out.read_text())
+    assert doc["val"].endswith("studio_coarse/images/eval")
+    assert doc["nc"] == 2
+    assert doc["names"] == {0: "alcohol", 1: "candy"}
+    assert doc["path"].endswith("studio_coarse")
+
+
 def test_verify_no_leak_raises_on_shared_scene(tmp_path):
     a = tmp_path / "a"; b = tmp_path / "b"; a.mkdir(); b.mkdir()
     (a / "20181025-15-09-20-1.jpg").write_bytes(b"x")
