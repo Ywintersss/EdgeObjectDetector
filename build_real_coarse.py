@@ -128,7 +128,11 @@ def write_blend_yaml(out_path, real_ft_images, synth_coarse_images, studio_image
 
 
 def write_single_item_yaml(out_path, studio_eval_images, studio_root, coarse_names) -> None:
-    """Single-item eval yaml: val = held-out studio slice (coarse-17)."""
+    """Single-item eval yaml: val = held-out studio slice (coarse-17).
+
+    NOTE: this eval slice is sampled from dataset_640/train and is NOT guaranteed
+    disjoint from the synthetic cut-out sources in the blend; treat single-item
+    numbers as a soft signal, not a clean held-out metric."""
     doc = {
         "path": Path(studio_root).resolve().as_posix(),
         "train": Path(studio_eval_images).resolve().as_posix(),  # unused; YOLO needs a key

@@ -135,6 +135,18 @@ def test_main_parses_args(monkeypatch):
     assert rc == 0
 
 
+def test_materialize_split_remaps_multibox_label(tmp_path):
+    src_img = tmp_path / "si"; src_img.mkdir()
+    src_lbl = tmp_path / "sl"; src_lbl.mkdir()
+    (src_img / "m.jpg").write_bytes(b"J")
+    (src_lbl / "m.txt").write_text("5 0.1 0.2 0.3 0.4\n7 0.5 0.6 0.1 0.1\n")
+    out_img = tmp_path / "o" / "images" / "real_ft"
+    out_lbl = tmp_path / "o" / "labels" / "real_ft"
+    B.materialize_split(["m"], src_img, src_lbl, out_img, out_lbl, {5: 2, 7: 3})
+    lines = (out_lbl / "m.txt").read_text().splitlines()
+    assert lines == ["2 0.1 0.2 0.3 0.4", "3 0.5 0.6 0.1 0.1"]
+
+
 def test_is_complete_sentinel(tmp_path):
     out = tmp_path / "dataset_real"
     out.mkdir()
