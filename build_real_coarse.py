@@ -19,13 +19,20 @@ from remap_to_coarse import build_coarse_mapping, remap_label_line
 
 
 def scene_key(filename: str) -> str:
-    """RPC scene id = filename stem with the trailing '-<cameraId>' removed.
+    """RPC scene id = (capture date, station id) — groups every burst frame of one tray.
 
-    '20181025-15-09-20-161.jpg' -> '20181025-15-09-20' (groups all camera/burst
-    frames of one physical tray so they never split across train/eval).
+    Filenames are 'YYYYMMDD-HH-MM-SS-<station>'. One physical arrangement is captured as
+    a ~3-shot burst seconds apart, so the timestamp (HH-MM-SS) is UNIQUE per image while
+    the trailing station id is REUSED across dates. The scene is therefore the
+    (date, station) pair: '20180824-15-44-39-474.jpg' -> '20180824-474', and its burst
+    siblings '...-44-47-474' / '...-44-56-474' map to the same key.
+
+    NOTE: the earlier version keyed on the timestamp (stem minus the last field), which is
+    unique per shot — it scattered each scene's burst frames across train/eval and caused
+    100% train->eval leakage. Grouping on (date, station) is what prevents that.
     """
-    stem = Path(filename).stem
-    return stem.rsplit("-", 1)[0]
+    parts = Path(filename).stem.split("-")
+    return f"{parts[0]}-{parts[-1]}"
 
 
 def split_by_scene(basenames, ratios=(0.75, 0.125, 0.125), seed=0):

@@ -8,27 +8,42 @@ import yaml
 import build_real_coarse as B
 
 
-def test_scene_key_strips_camera_id():
-    assert B.scene_key("20181025-15-09-20-161.jpg") == "20181025-15-09-20"
-    assert B.scene_key("20181025-14-40-13-146.jpg") == "20181025-14-40-13"
+def test_scene_key_groups_by_date_and_station():
+    # RPC filename = YYYYMMDD-HH-MM-SS-<station>. A physical tray is one (date, station)
+    # burst captured as ~3 shots seconds apart; the station id is REUSED across dates.
+    # The scene key must be (date, station), NOT the timestamp.
+    assert B.scene_key("20180824-15-44-39-474.jpg") == "20180824-474"
+    # burst siblings of the SAME arrangement (same date+station, different seconds) -> same key
+    assert B.scene_key("20180824-15-44-39-474.jpg") == B.scene_key("20180824-15-44-56-474.jpg")
+    # different station on the same date -> different scene
+    assert B.scene_key("20180824-15-50-57-480.jpg") == "20180824-480"
+    # same station on a DIFFERENT date -> different scene (station id is reused daily)
+    assert B.scene_key("20180825-15-44-39-474.jpg") == "20180825-474"
 
 
 def test_split_by_scene_no_scene_overlap():
-    # two scenes, several camera frames each
-    names = [f"20181025-15-09-20-{c}.jpg" for c in range(6)] + \
-            [f"20181025-14-40-13-{c}.jpg" for c in range(6)]
+    # 8 physical scenes = (date, station), each a 3-frame burst (differ only in seconds)
+    names = [f"20180824-15-44-{sec:02d}-{station}.jpg"
+             for station in range(8)
+             for sec in (39, 47, 56)]
     parts = B.split_by_scene(names, seed=0)
     keys = {k: {B.scene_key(n) for n in v} for k, v in parts.items()}
     # no scene key appears in more than one split
     all_pairs = [("real_ft", "real_eval"), ("real_ft", "reserve"), ("real_eval", "reserve")]
     for a, b in all_pairs:
         assert keys[a].isdisjoint(keys[b]), f"scene leak between {a} and {b}"
+    # all 3 frames of a scene land in the SAME split (no burst gets split)
+    for station in range(8):
+        holders = [name for name, v in parts.items()
+                   if any(B.scene_key(n) == f"20180824-{station}" for n in v)]
+        assert len(holders) == 1, f"scene 20180824-{station} split across {holders}"
     # every input basename lands in exactly one split
     assert sum(len(v) for v in parts.values()) == len(names)
 
 
 def test_split_by_scene_deterministic():
-    names = [f"2018-00-00-{s:02d}-{c}.jpg" for s in range(20) for c in range(3)]
+    names = [f"20180824-15-{sc:02d}-{fr:02d}-{station}.jpg"
+             for station in range(20) for sc, fr in ((10, 0), (10, 5), (10, 9))]
     assert B.split_by_scene(names, seed=0) == B.split_by_scene(names, seed=0)
 
 
@@ -119,8 +134,9 @@ def test_write_single_item_yaml_structure(tmp_path):
 
 def test_verify_no_leak_raises_on_shared_scene(tmp_path):
     a = tmp_path / "a"; b = tmp_path / "b"; a.mkdir(); b.mkdir()
-    (a / "20181025-15-09-20-1.jpg").write_bytes(b"x")
-    (b / "20181025-15-09-20-2.jpg").write_bytes(b"x")   # SAME scene key -> leak
+    # same (date, station)=20180824-474, different seconds = burst siblings of ONE scene
+    (a / "20180824-15-44-39-474.jpg").write_bytes(b"x")
+    (b / "20180824-15-44-56-474.jpg").write_bytes(b"x")   # same scene key -> leak
     with pytest.raises(AssertionError):
         B.verify_no_leak({"a": a, "b": b})
 
