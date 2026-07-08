@@ -101,3 +101,51 @@ def materialize_split(basenames, src_images, src_labels, out_images, out_labels,
         (out_labels / f"{stem}.txt").write_text(out, encoding="utf-8")
         n_lbl += 1
     return n_img, n_lbl
+
+
+def names_from_json(json_path) -> list[str]:
+    """Canonical 200 class names in the SAME order coco_to_yolo 0-indexes them."""
+    doc = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    return [c["name"] for c in doc["categories"]]
+
+
+def _yaml_names_block(coarse_names):
+    return {i: n for i, n in enumerate(coarse_names)}
+
+
+def write_blend_yaml(out_path, real_ft_images, synth_coarse_images, studio_images,
+                     real_eval_images, coarse_names) -> None:
+    """Blend yaml: multi-path train (real + synth-coarse + studio-coarse), val=real_eval."""
+    doc = {
+        "train": [Path(real_ft_images).resolve().as_posix(),
+                  Path(synth_coarse_images).resolve().as_posix(),
+                  Path(studio_images).resolve().as_posix()],
+        "val": Path(real_eval_images).resolve().as_posix(),
+        "nc": len(coarse_names),
+        "names": _yaml_names_block(coarse_names),
+    }
+    Path(out_path).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def write_single_item_yaml(out_path, studio_eval_images, studio_root, coarse_names) -> None:
+    """Single-item eval yaml: val = held-out studio slice (coarse-17)."""
+    doc = {
+        "path": Path(studio_root).resolve().as_posix(),
+        "train": Path(studio_eval_images).resolve().as_posix(),  # unused; YOLO needs a key
+        "val": Path(studio_eval_images).resolve().as_posix(),
+        "nc": len(coarse_names),
+        "names": _yaml_names_block(coarse_names),
+    }
+    Path(out_path).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def verify_no_leak(image_dirs) -> None:
+    """Assert no scene_key is shared across any two image dirs (train/eval/reserve)."""
+    keyset = {}
+    for name, d in image_dirs.items():
+        keyset[name] = {scene_key(p.name) for p in Path(d).glob("*.jpg")}
+    names = list(keyset)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            overlap = keyset[names[i]] & keyset[names[j]]
+            assert not overlap, f"scene leak {names[i]}<->{names[j]}: {sorted(overlap)[:3]}"

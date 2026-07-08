@@ -76,3 +76,35 @@ def test_materialize_split_hardlinks_images_and_remaps_labels(tmp_path):
     assert (out_img / "a.jpg").read_bytes() == b"JPEGDATA"
     # out image dir is a REAL directory, not a reparse point
     assert out_img.is_dir() and not out_img.is_symlink()
+
+
+def test_names_from_json(tmp_path):
+    j = tmp_path / "c.json"
+    j.write_text(json.dumps({"categories": [
+        {"id": 1, "name": "1_puffed_food"}, {"id": 2, "name": "5_drink"}],
+        "images": [], "annotations": []}))
+    assert B.names_from_json(j) == ["1_puffed_food", "5_drink"]
+
+
+def test_write_blend_yaml_structure(tmp_path):
+    out = tmp_path / "blend.yml"
+    B.write_blend_yaml(out,
+                       real_ft_images=tmp_path / "dataset_real/images/real_ft",
+                       synth_coarse_images=tmp_path / "dataset_synth_coarse/images/train",
+                       studio_images=tmp_path / "studio_coarse/images/train",
+                       real_eval_images=tmp_path / "dataset_real/images/real_eval",
+                       coarse_names=["alcohol", "candy"])
+    doc = yaml.safe_load(out.read_text())
+    assert isinstance(doc["train"], list) and len(doc["train"]) == 3
+    assert doc["train"][0].endswith("dataset_real/images/real_ft")
+    assert doc["val"].endswith("dataset_real/images/real_eval")
+    assert doc["nc"] == 2
+    assert doc["names"] == {0: "alcohol", 1: "candy"}
+
+
+def test_verify_no_leak_raises_on_shared_scene(tmp_path):
+    a = tmp_path / "a"; b = tmp_path / "b"; a.mkdir(); b.mkdir()
+    (a / "20181025-15-09-20-1.jpg").write_bytes(b"x")
+    (b / "20181025-15-09-20-2.jpg").write_bytes(b"x")   # SAME scene key -> leak
+    with pytest.raises(AssertionError):
+        B.verify_no_leak({"a": a, "b": b})
