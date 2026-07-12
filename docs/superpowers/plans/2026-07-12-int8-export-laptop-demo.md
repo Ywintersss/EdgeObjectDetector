@@ -759,7 +759,8 @@ def test_open_camera_invalid_index_raises_with_enumeration():
         W.open_camera(999)
 
 
-@pytest.mark.skipif(not WEIGHTS.exists(), reason="trained weights not present")
+@pytest.mark.skipif(not (WEIGHTS.exists() and REAL_IMAGES.is_dir()),
+                    reason="trained weights or real_eval images not present")
 def test_detect_frame_finds_objects_in_a_real_cluttered_image():
     from ultralytics import YOLO
 
@@ -779,7 +780,8 @@ def test_detect_frame_finds_objects_in_a_real_cluttered_image():
         assert 0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h, "box outside image bounds"
 
 
-@pytest.mark.skipif(not WEIGHTS.exists(), reason="trained weights not present")
+@pytest.mark.skipif(not (WEIGHTS.exists() and REAL_IMAGES.is_dir()),
+                    reason="trained weights or real_eval images not present")
 def test_draw_detections_returns_same_shape_frame():
     from ultralytics import YOLO
 
