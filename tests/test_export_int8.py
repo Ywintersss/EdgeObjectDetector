@@ -1,4 +1,5 @@
 # tests/test_export_int8.py
+import numpy as np
 import pytest
 import yaml
 
@@ -64,6 +65,18 @@ def test_build_report_table_includes_rows_and_delta():
     assert "-1.9" in md           # delta in percentage points, signed
 
 
+def test_build_report_table_states_calibration_eval_overlap_caveat():
+    # dataset_real_blend.yml's `val:` split IS real_eval, and Ultralytics calibrates
+    # from the val split -- so quantization ranges are tuned on the very images the
+    # quantization cost is then measured against. The number is optimistically biased
+    # and the report must say so, or a reader will treat it as an unbiased estimate.
+    md = E.build_report_table([])
+    lowered = md.lower()
+    assert "calibration" in lowered
+    assert "real_eval" in lowered
+    assert "lower bound" in lowered or "optimistic" in lowered
+
+
 def test_build_report_table_marks_failed_rows():
     rows = [{"size": 640, "status": "FAILED", "error": "onnx2tf blew up"}]
     md = E.build_report_table(rows)
@@ -99,6 +112,83 @@ def test_build_export_kwargs_forces_int8_and_real_calibration():
     assert kw["data"] == "dataset_real_blend.yml"
 
 
+def test_build_export_kwargs_honors_export_format():
+    # The escape hatch: if the default (litert) path emits float32 graph I/O, the
+    # user must be able to rerun via saved_model to get *_full_integer_quant.tflite,
+    # which is what the Edge TPU compiler actually consumes.
+    kw = E.build_export_kwargs(448, "dataset_real_blend.yml", export_format="saved_model")
+    assert kw["format"] == "saved_model"
+    assert kw["int8"] is True          # still non-negotiable on the alternate path
+    assert kw["data"] == "dataset_real_blend.yml"
+    assert kw["imgsz"] == 448
+
+
+# --- fully-integer graph I/O verification -------------------------------------------
+# int8=True no longer guarantees an integer-I/O graph: Ultralytics 8.4.83+ rewrites
+# format="tflite" to the litert path, which deliberately keeps FP32 graph input/output.
+# The Edge TPU cannot consume that, so we must assert on the ARTIFACT, not the kwargs.
+
+def test_assert_integer_io_accepts_int8_and_uint8():
+    E._assert_integer_io(np.int8, np.int8, "m.tflite")      # must not raise
+    E._assert_integer_io(np.uint8, np.uint8, "m.tflite")    # must not raise
+    E._assert_integer_io(np.int8, np.uint8, "m.tflite")     # must not raise
+
+
+def test_assert_integer_io_rejects_float_input():
+    with pytest.raises(ValueError) as exc:
+        E._assert_integer_io(np.float32, np.int8, "m.tflite")
+    msg = str(exc.value)
+    assert "float32" in msg                    # names the ACTUAL dtype seen
+    assert "--export-format saved_model" in msg  # names the remedy, at the moment of need
+
+
+def test_assert_integer_io_rejects_float_output():
+    with pytest.raises(ValueError) as exc:
+        E._assert_integer_io(np.int8, np.float32, "m.tflite")
+    msg = str(exc.value)
+    assert "float32" in msg
+    assert "--export-format saved_model" in msg
+
+
+def test_assert_integer_io_rejects_float_both():
+    with pytest.raises(ValueError, match="float32"):
+        E._assert_integer_io(np.float32, np.float32, "m.tflite")
+
+
+def test_resolve_export_artifact_passes_through_a_file(tmp_path):
+    f = tmp_path / "best_int8.tflite"
+    f.write_bytes(b"TFL3")
+    assert E._resolve_export_artifact(f) == f
+
+
+def test_resolve_export_artifact_finds_tflite_inside_a_directory(tmp_path):
+    # model.export() can return a *_saved_model/ DIRECTORY; copying that with
+    # shutil.copy2 would raise IsADirectoryError.
+    d = tmp_path / "best_saved_model"
+    d.mkdir()
+    (d / "best_float32.tflite").write_bytes(b"nope")
+    wanted = d / "best_full_integer_quant.tflite"
+    wanted.write_bytes(b"TFL3")
+
+    assert E._resolve_export_artifact(d) == wanted
+
+
+def test_resolve_export_artifact_directory_without_full_integer_raises(tmp_path):
+    d = tmp_path / "best_saved_model"
+    d.mkdir()
+    (d / "best_float32.tflite").write_bytes(b"nope")
+    with pytest.raises(ValueError, match="full_integer_quant"):
+        E._resolve_export_artifact(d)
+
+
+def test_verify_full_integer_rejects_a_non_model_file(tmp_path):
+    # Not a mock: a real interpreter is constructed and really rejects this.
+    bad = tmp_path / "bad.tflite"
+    bad.write_bytes(b"not a flatbuffer")
+    with pytest.raises((ValueError, RuntimeError)):
+        E.verify_full_integer(bad)
+
+
 def test_verify_class_count_accepts_17():
     E.verify_class_count(["c"] * 17)   # must not raise
 
@@ -131,6 +221,47 @@ def test_write_bundle_rejects_wrong_class_count(tmp_path):
     src.write_bytes(b"TFL3")
     with pytest.raises(ValueError, match="17"):
         E.write_bundle(src, ["only_one"], tmp_path / "deploy")
+
+
+def test_write_bundle_removes_stale_tflite_models(tmp_path):
+    # Bundling 448 after having bundled 320 must not leave BOTH models in deploy/,
+    # or the demo can silently run the size the user did not choose.
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    stale = deploy / "rpc_coarse17_int8_320.tflite"
+    stale.write_bytes(b"OLD")
+
+    src = tmp_path / "rpc_coarse17_int8_448.tflite"
+    src.write_bytes(b"NEW")
+    E.write_bundle(src, _class_names_17(), deploy)
+
+    assert not stale.exists(), "stale model left behind -> demo could run the wrong size"
+    assert [p.name for p in deploy.glob("*.tflite")] == ["rpc_coarse17_int8_448.tflite"]
+
+
+def test_val_tflite_fails_loudly_when_latency_is_missing(monkeypatch):
+    # latency is a PUBLISHED column of the deliverable table; a silent 0.0 ms would
+    # be a fabricated number in a report someone reads as measured.
+    import ultralytics
+
+    class _Box:
+        map50 = 0.99
+        map = 0.86
+
+    class _Metrics:
+        box = _Box()
+        speed = {}          # no "inference" key
+
+    class _FakeYOLO:
+        def __init__(self, *a, **kw):
+            pass
+
+        def val(self, *a, **kw):
+            return _Metrics()
+
+    monkeypatch.setattr(ultralytics, "YOLO", _FakeYOLO)
+    with pytest.raises(KeyError):
+        E.val_tflite("m.tflite", "d.yml", 320)
 
 
 def test_main_dry_returns_zero(monkeypatch):
@@ -197,3 +328,58 @@ def test_main_malformed_sizes_fails_fast(monkeypatch, tmp_path, capsys):
 
     assert rc == 1
     assert "ERROR" in captured.err
+
+
+def test_main_bundle_does_not_require_single_yaml_or_sizes(monkeypatch, tmp_path, capsys):
+    # --bundle consumes neither eval_single_item.yml nor --sizes, so demanding them
+    # blocks a legitimate bundle run for inputs it will never read.
+    import sys as _sys
+
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"fake-weights")
+    calib = tmp_path / "calib.yml"
+    calib.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "rpc_coarse17_int8_320.tflite").write_bytes(b"TFL3")
+    deploy_dir = tmp_path / "deploy"
+    monkeypatch.setattr(E, "PROJECT_ROOT", tmp_path)
+
+    monkeypatch.setattr(_sys, "argv", [
+        "export_int8.py",
+        "--weights", str(weights),
+        "--calib", str(calib),
+        "--single", str(tmp_path / "never_created.yml"),   # missing, and irrelevant
+        "--sizes", "abc",                                  # malformed, and irrelevant
+        "--bundle", "320",
+    ])
+
+    rc = E.main()
+    assert rc == 0, capsys.readouterr().err
+    assert (deploy_dir / "rpc_coarse17_int8_320.tflite").exists()
+    assert (deploy_dir / "classes.txt").exists()
+
+
+def test_main_yaml_without_names_key_returns_clean_error(monkeypatch, tmp_path, capsys):
+    # A yaml missing its names: block must produce the ERROR/return-1 pattern used
+    # everywhere else in main(), not a raw KeyError traceback.
+    import sys as _sys
+
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"fake-weights")
+    calib = tmp_path / "calib.yml"
+    calib.write_text(yaml.safe_dump({"nc": 17}), encoding="utf-8")   # no names:
+    single = tmp_path / "single.yml"
+    single.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+
+    monkeypatch.setattr(_sys, "argv", [
+        "export_int8.py",
+        "--weights", str(weights),
+        "--calib", str(calib),
+        "--single", str(single),
+    ])
+
+    rc = E.main()
+    assert rc == 1
+    assert "ERROR" in capsys.readouterr().err
