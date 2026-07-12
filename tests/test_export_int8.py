@@ -88,3 +88,24 @@ def test_gate_verdict_exact_5_0_point_drop_is_acceptable():
     baseline = 0.879
     model_map = baseline - 0.05
     assert E.gate_verdict(baseline, model_map) == "acceptable"
+
+
+def test_build_export_kwargs_forces_int8_and_real_calibration():
+    kw = E.build_export_kwargs(320, "dataset_real_blend.yml")
+    assert kw["format"] == "tflite"
+    assert kw["int8"] is True          # Coral runs ONLY fully-integer models
+    assert kw["imgsz"] == 320
+    # calibration MUST read the real cluttered deployment distribution
+    assert kw["data"] == "dataset_real_blend.yml"
+
+
+def test_verify_class_count_accepts_17():
+    E.verify_class_count(["c"] * 17)   # must not raise
+
+
+def test_verify_class_count_rejects_wrong_count():
+    # guards the silent disaster: wrong model bundled -> every box confidently mislabeled
+    with pytest.raises(ValueError, match="17"):
+        E.verify_class_count(["c"] * 16)
+    with pytest.raises(ValueError, match="17"):
+        E.verify_class_count(["c"] * 200)

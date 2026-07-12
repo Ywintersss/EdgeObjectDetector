@@ -78,6 +78,54 @@ def gate_verdict(baseline_map: float, model_map: float) -> str:
     return "RED FLAG"
 
 
+def build_export_kwargs(size: int, calib_yaml: str) -> dict:
+    """Ultralytics export kwargs for a fully-integer TFLite model.
+
+    int8=True is non-negotiable: the Edge TPU executes ONLY fully-integer models.
+    `data` supplies the calibration images that set the quantization ranges.
+    """
+    return {"format": "tflite", "int8": True, "imgsz": size, "data": calib_yaml}
+
+
+def verify_class_count(names: list[str]) -> None:
+    """Fail loudly unless the model/labels carry exactly 17 coarse classes.
+
+    A wrong class count means every detection is confidently mislabeled while nothing
+    crashes — the worst failure mode, because it looks like success.
+    """
+    if len(names) != EXPECTED_CLASSES:
+        raise ValueError(
+            f"expected {EXPECTED_CLASSES} classes, got {len(names)} — wrong model or yaml?")
+
+
+def export_one_size(weights, size: int, calib_yaml: str, out_dir: Path) -> Path:
+    """Export weights -> INT8 TFLite at `size`. Returns the path of the copied artifact."""
+    import shutil
+
+    from ultralytics import YOLO
+
+    model = YOLO(str(weights))
+    produced = Path(model.export(**build_export_kwargs(size, str(calib_yaml))))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"rpc_coarse17_int8_{size}.tflite"
+    shutil.copy2(produced, dest)
+    return dest
+
+
+def val_tflite(tflite_path, data_yaml, size: int) -> dict:
+    """Validate an exported TFLite model. Returns mAP@50, mAP@50-95, and CPU latency (ms)."""
+    from ultralytics import YOLO
+
+    model = YOLO(str(tflite_path), task="detect")
+    metrics = model.val(data=str(data_yaml), imgsz=size, verbose=False)
+    return {
+        "map50": float(metrics.box.map50),
+        "map": float(metrics.box.map),
+        "latency_ms": float(metrics.speed.get("inference", 0.0)),
+    }
+
+
 def build_report_table(rows: list[dict]) -> str:
     """Render the size-vs-accuracy table. FAILED sizes are shown, never dropped."""
     lines = [
