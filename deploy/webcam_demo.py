@@ -78,3 +78,81 @@ def draw_detections(frame, detections: list[dict], names: list[str]):
         cv2.putText(frame, label, (x1, max(y1 - 6, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
     return frame
+
+
+def run_loop(model, cap, names, conf: float) -> None:
+    """Read frames, detect, draw, show FPS. 'q' quits."""
+    prev = time.time()
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            print("WARNING: dropped frame from camera", file=sys.stderr)
+            break
+
+        detections = detect_frame(model, frame, conf=conf)
+        frame = draw_detections(frame, detections, names)
+
+        now = time.time()
+        fps = 1.0 / max(now - prev, 1e-6)
+        prev = now
+        cv2.putText(frame, f"{fps:5.1f} FPS  |  {len(detections)} objects",
+                    (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "POINT CAMERA DOWN at a plain surface",
+                    (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
+
+        cv2.imshow("EdgeObjectDetector — coarse-17 (press q to quit)", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Live overhead-camera demo (coarse-17 INT8).")
+    p.add_argument("--model", default=str(HERE / "rpc_coarse17_int8_320.tflite"))
+    p.add_argument("--classes", default=str(HERE / "classes.txt"))
+    p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--conf", type=float, default=0.25)
+    args = p.parse_args()
+
+    model_path = Path(args.model)
+    if not model_path.exists():
+        print(f"ERROR: model not found: {model_path}", file=sys.stderr)
+        return 1
+
+    try:
+        names = load_classes(args.classes)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if len(names) != EXPECTED_CLASSES:
+        print(f"ERROR: expected {EXPECTED_CLASSES} classes, got {len(names)} — "
+              f"wrong classes.txt bundled? Every box would be mislabeled.", file=sys.stderr)
+        return 1
+
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        print(f"ERROR: ultralytics not installed ({exc}). Run: pip install ultralytics "
+              f"opencv-python", file=sys.stderr)
+        return 1
+
+    try:
+        cap = open_camera(args.camera)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    model = YOLO(str(model_path), task="detect")
+    print(f"Running {model_path.name} on camera {args.camera}. Press 'q' to quit.")
+    print("POINT THE CAMERA DOWN at products on a plain surface.")
+
+    try:
+        run_loop(model, cap, names, args.conf)
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -63,3 +63,11 @@ def test_draw_detections_returns_same_shape_frame():
 
     out = W.draw_detections(frame.copy(), dets, ["c"] * 17)
     assert out.shape == frame.shape
+
+
+def test_main_missing_model_returns_error(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(sys, "argv",
+                        ["webcam_demo.py", "--model", str(tmp_path / "nope.tflite")])
+    rc = W.main()
+    assert rc == 1                          # never silently continue without a model
+    assert "ERROR" in capsys.readouterr().err
