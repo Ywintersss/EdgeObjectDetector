@@ -58,3 +58,46 @@ def load_class_names(yaml_path) -> list[str]:
     if isinstance(names, dict):
         return [names[i] for i in sorted(names)]
     return list(names)
+
+
+def gate_verdict(baseline_map: float, model_map: float) -> str:
+    """Classify the INT8 accuracy drop per the spec's quantization gate.
+
+    Drop is in PERCENTAGE POINTS of mAP@50-95: <2 clean, 2-5 acceptable, >5 RED FLAG.
+    A RED FLAG means the first suspect is the calibration data, not the input size.
+    """
+    drop_points = (baseline_map - model_map) * 100.0
+    if drop_points < 2.0:
+        return "clean"
+    if drop_points <= 5.0:
+        return "acceptable"
+    return "RED FLAG"
+
+
+def build_report_table(rows: list[dict]) -> str:
+    """Render the size-vs-accuracy table. FAILED sizes are shown, never dropped."""
+    lines = [
+        "# INT8 Export Report",
+        "",
+        f"FP32 baseline — cluttered mAP@50-95: **{BASELINE['cluttered_map']:.3f}**, "
+        f"single-item: **{BASELINE['single_map']:.3f}**",
+        "",
+        "Latency is desktop CPU, for comparing sizes against each other only — "
+        "it is NOT a Coral FPS forecast.",
+        "",
+        "| Size | Cluttered mAP@50 | Cluttered mAP@50-95 | Δ vs FP32 (pts) | Gate | "
+        "Single mAP@50-95 | File | CPU latency |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for r in sorted(rows, key=lambda x: -x["size"]):
+        if r["status"] != "ok":
+            lines.append(
+                f"| {r['size']} | FAILED | FAILED | — | FAILED | — | — | {r.get('error', '')} |")
+            continue
+        delta = (r["cluttered_map"] - BASELINE["cluttered_map"]) * 100.0
+        verdict = gate_verdict(BASELINE["cluttered_map"], r["cluttered_map"])
+        lines.append(
+            f"| {r['size']} | {r['cluttered_map50']:.3f} | {r['cluttered_map']:.3f} | "
+            f"{delta:+.1f} | {verdict} | {r['single_map']:.3f} | "
+            f"{r['bytes'] / 1e6:.1f} MB | {r['latency_ms']:.1f} ms |")
+    return "\n".join(lines) + "\n"
