@@ -4,14 +4,20 @@ Self-contained. No dataset and no repo checkout needed.
 
 ## Setup
 
-    pip install ultralytics opencv-python
+    pip install ultralytics opencv-python ai-edge-litert
+
+`ai-edge-litert` is the runtime that actually executes the `.tflite` model. Ultralytics
+would otherwise try to pip-install it on the first frame, which fails offline.
 
 No CUDA required — the INT8 model runs on CPU, which is the point: it approximates
 what the Coral Edge TPU will execute.
 
 ## Run
 
-    python webcam_demo.py --model rpc_coarse17_int8_320.tflite --camera 0
+    python webcam_demo.py --camera 0
+
+The model is found automatically: exactly one `.tflite` is bundled into this folder by
+`export_int8.py --bundle SIZE`. Pass `--model path/to.tflite` only to override it.
 
 ## POINT THE CAMERA DOWN
 

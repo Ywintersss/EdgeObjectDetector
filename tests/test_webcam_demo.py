@@ -65,6 +65,93 @@ def test_draw_detections_returns_same_shape_frame():
     assert out.shape == frame.shape
 
 
+def test_draw_detections_rejects_out_of_range_class_id(blank_canvas):
+    # A short/stale classes.txt would otherwise blow up with a bare IndexError deep
+    # in the draw path -- undiagnosable. The error must name the actual diagnosis.
+    dets = [{"cls": 17, "conf": 0.9, "box": (1, 1, 20, 20)}]
+    with pytest.raises(ValueError, match="stale classes.txt"):
+        W.draw_detections(blank_canvas, dets, ["c"] * 17)
+
+
+class _FakeCap:
+    """Minimal cv2.VideoCapture stand-in: always yields one gray frame."""
+
+    def __init__(self):
+        import numpy as np
+        self._frame = np.full((32, 32, 3), 127, dtype="uint8")
+
+    def read(self):
+        return True, self._frame.copy()
+
+    def release(self):
+        pass
+
+
+def test_run_loop_returns_nonzero_when_inference_raises(capsys):
+    # THE default cold-laptop path: LiteRTBackend is built lazily on the FIRST
+    # predict(), where Ultralytics tries to pip-install ai-edge-litert. With no
+    # network / no wheel, that raises -- and an unhandled traceback out of run_loop()
+    # is what the user sees. It must be a clean error + non-zero exit instead.
+    class _BoomModel:
+        def predict(self, *a, **kw):
+            raise RuntimeError("check_requirements: ai-edge-litert install failed")
+
+    rc = W.run_loop(_BoomModel(), _FakeCap(), ["c"] * 17, conf=0.25)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    assert "inference failed" in err
+    assert "ai-edge-litert" in err          # the underlying cause is surfaced, not eaten
+
+
+def test_run_loop_returns_nonzero_when_a_class_id_is_out_of_range(capsys):
+    # A model emitting a class id past the bundled names (stale classes.txt) must
+    # also exit cleanly, not blow a raw ValueError traceback out of the loop.
+    import numpy as np
+
+    class _BadClassModel:
+        def predict(self, *a, **kw):
+            class _B:
+                cls = [99]                                    # past the 17 bundled names
+                conf = [0.9]
+                xyxy = np.array([[1, 1, 20, 20]])             # .tolist() like a real Boxes
+
+            class _R:
+                boxes = [_B()]
+
+            return [_R()]
+
+    rc = W.run_loop(_BadClassModel(), _FakeCap(), ["c"] * 17, conf=0.25)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    assert "stale classes.txt" in err
+
+
+def test_resolve_model_path_finds_the_single_bundled_model(tmp_path):
+    m = tmp_path / "rpc_coarse17_int8_448.tflite"
+    m.write_bytes(b"TFL3")
+    assert W.resolve_model_path(tmp_path) == m
+
+
+def test_resolve_model_path_errors_when_no_model_bundled(tmp_path):
+    with pytest.raises(FileNotFoundError, match="--bundle"):
+        W.resolve_model_path(tmp_path)
+
+
+def test_resolve_model_path_errors_when_several_models_present(tmp_path):
+    (tmp_path / "rpc_coarse17_int8_320.tflite").write_bytes(b"TFL3")
+    (tmp_path / "rpc_coarse17_int8_448.tflite").write_bytes(b"TFL3")
+    with pytest.raises(RuntimeError) as exc:
+        W.resolve_model_path(tmp_path)
+    msg = str(exc.value)
+    # must LIST them -- otherwise the user cannot tell which one would have run
+    assert "rpc_coarse17_int8_320.tflite" in msg
+    assert "rpc_coarse17_int8_448.tflite" in msg
+
+
 def test_main_missing_model_returns_error(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "argv",
                         ["webcam_demo.py", "--model", str(tmp_path / "nope.tflite")])
