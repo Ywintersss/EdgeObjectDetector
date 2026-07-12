@@ -71,3 +71,49 @@ def test_main_missing_model_returns_error(monkeypatch, tmp_path, capsys):
     rc = W.main()
     assert rc == 1                          # never silently continue without a model
     assert "ERROR" in capsys.readouterr().err
+
+
+def test_main_invalid_model_fails_before_opening_camera(monkeypatch, tmp_path, capsys):
+    # A model file that EXISTS but is not a valid model. main() must fail cleanly on
+    # the model load, and it must do so BEFORE touching the camera -- --camera 999
+    # can never open, so if the ordering regresses to camera-first, this test would
+    # surface a camera error instead of a model-load error.
+    #
+    # NOTE on fixture choice: a corrupt *.tflite* does NOT raise inside YOLO(...) --
+    # verified empirically against the installed ultralytics. With task="detect"
+    # passed explicitly (as webcam_demo.py always does), Model._load() skips content
+    # inspection for non-.pt weights entirely; the LiteRT interpreter is only built
+    # lazily on the first predict() call, which already happens inside main()'s
+    # try/finally around run_loop(), so that specific case was never actually a leak.
+    # A corrupt *.pt* DOES raise synchronously (torch.load -> UnpicklingError) and so
+    # is the fixture that actually exercises the YOLO(...) construction guard this
+    # fix adds.
+    bad_model = tmp_path / "bad.pt"
+    bad_model.write_bytes(b"not a real model")
+
+    classes_path = tmp_path / "classes.txt"
+    classes_path.write_text(
+        "\n".join([
+            "alcohol", "candy", "canned_food", "chocolate", "dessert", "dried_food",
+            "dried_fruit", "drink", "gum", "instant_drink", "instant_noodles", "milk",
+            "personal_hygiene", "puffed_food", "seasoner", "stationery", "tissue",
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys, "argv", [
+        "webcam_demo.py",
+        "--model", str(bad_model),
+        "--classes", str(classes_path),
+        "--camera", "999",
+    ])
+    rc = W.main()
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    # Must be a MODEL load failure, not a camera-open failure -- camera 999 can never
+    # open, so a camera-first ordering would ALSO return 1 with "ERROR" in stderr,
+    # which would make this test pass for the wrong reason.
+    assert "camera" not in err.lower(), (
+        f"camera was touched before the (bad) model load failed: {err!r}")
+    assert "model" in err.lower()

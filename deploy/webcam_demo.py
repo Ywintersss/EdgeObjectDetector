@@ -136,13 +136,21 @@ def main() -> int:
               f"opencv-python", file=sys.stderr)
         return 1
 
+    # Load the model BEFORE touching the camera: a bad model (corrupt/truncated
+    # export -- the shakiest part of the INT8 toolchain) then fails before any
+    # hardware is opened, so there is nothing to leak.
+    try:
+        model = YOLO(str(model_path), task="detect")
+    except Exception as exc:
+        print(f"ERROR: failed to load model {model_path}: {exc}", file=sys.stderr)
+        return 1
+
     try:
         cap = open_camera(args.camera)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    model = YOLO(str(model_path), task="detect")
     print(f"Running {model_path.name} on camera {args.camera}. Press 'q' to quit.")
     print("POINT THE CAMERA DOWN at products on a plain surface.")
 
