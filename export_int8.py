@@ -153,3 +153,97 @@ def build_report_table(rows: list[dict]) -> str:
             f"{delta:+.1f} | {verdict} | {r['single_map']:.3f} | "
             f"{r['bytes'] / 1e6:.1f} MB | {r['latency_ms']:.1f} ms |")
     return "\n".join(lines) + "\n"
+
+
+def write_bundle(tflite_path, names: list[str], deploy_dir) -> None:
+    """Assemble the laptop bundle: the chosen model + a DERIVED classes.txt.
+
+    classes.txt is generated from the yaml names block, never hand-typed — a
+    hand-typed ordering is exactly how you get silently mislabeled detections.
+    """
+    import shutil
+
+    verify_class_count(names)
+    deploy_dir = Path(deploy_dir)
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tflite_path, deploy_dir / Path(tflite_path).name)
+    (deploy_dir / "classes.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+
+
+def _run_sweep(args) -> int:
+    """Export + validate each size, then write export/report.md. Returns an exit code."""
+    out_dir = PROJECT_ROOT / "export"
+    rows = []
+    for size in parse_sizes(args.sizes):
+        print(f"\n=== size {size}: exporting INT8 (calibrating on {args.calib}) ===")
+        try:
+            tflite = export_one_size(args.weights, size, args.calib, out_dir)
+            cluttered = val_tflite(tflite, args.calib, size)
+            single = val_tflite(tflite, args.single, size)
+            rows.append({
+                "size": size, "status": "ok",
+                "cluttered_map50": cluttered["map50"], "cluttered_map": cluttered["map"],
+                "single_map50": single["map50"], "single_map": single["map"],
+                "bytes": tflite.stat().st_size, "latency_ms": cluttered["latency_ms"],
+            })
+            print(f"  size {size}: cluttered mAP@50-95 = {cluttered['map']:.3f} "
+                  f"({gate_verdict(BASELINE['cluttered_map'], cluttered['map'])})")
+        except Exception as exc:  # noqa: BLE001 — one bad size must not kill the sweep
+            print(f"ERROR: size {size} FAILED: {exc}", file=sys.stderr)
+            rows.append({"size": size, "status": "FAILED", "error": str(exc)})
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = out_dir / "report.md"
+    report.write_text(build_report_table(rows), encoding="utf-8")
+    print(f"\nWrote {report}")
+
+    # Non-zero exit if EVERY size failed — the sweep produced nothing usable.
+    return 1 if all(r["status"] != "ok" for r in rows) else 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="INT8 export sweep + deploy bundle (non-destructive).")
+    p.add_argument("--weights",
+                   default="runs/detect/rpc_real_blend_b0_full/weights/best.pt")
+    p.add_argument("--calib", default="dataset_real_blend.yml",
+                   help="Calibration + cluttered-eval yaml. MUST be the real cluttered set.")
+    p.add_argument("--single", default="eval_single_item.yml",
+                   help="Single-item eval yaml.")
+    p.add_argument("--sizes", default="640,448,320")
+    p.add_argument("--bundle", type=int, default=None,
+                   help="Assemble deploy/ from the already-exported model of this size.")
+    p.add_argument("--dry", action="store_true", help="Parse args and exit (test hook).")
+    args = p.parse_args()
+    if args.dry:
+        return 0
+
+    weights = Path(args.weights)
+    calib = Path(args.calib)
+    if not weights.exists():
+        print(f"ERROR: weights not found: {weights}", file=sys.stderr)
+        return 1
+    if not calib.exists():
+        print(f"ERROR: calibration yaml not found: {calib}", file=sys.stderr)
+        return 1
+
+    names = load_class_names(calib)
+    try:
+        verify_class_count(names)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if args.bundle is not None:
+        tflite = PROJECT_ROOT / "export" / f"rpc_coarse17_int8_{args.bundle}.tflite"
+        if not tflite.exists():
+            print(f"ERROR: no exported model at {tflite}; run the sweep first.", file=sys.stderr)
+            return 1
+        write_bundle(tflite, names, PROJECT_ROOT / "deploy")
+        print(f"Bundled {tflite.name} + classes.txt -> deploy/")
+        return 0
+
+    return _run_sweep(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -109,3 +109,31 @@ def test_verify_class_count_rejects_wrong_count():
         E.verify_class_count(["c"] * 16)
     with pytest.raises(ValueError, match="17"):
         E.verify_class_count(["c"] * 200)
+
+
+def test_write_bundle_copies_model_and_writes_classes(tmp_path):
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3")
+    deploy = tmp_path / "deploy"
+    names = ["alcohol", "candy", "canned_food", "chocolate", "dessert", "dried_food",
+             "dried_fruit", "drink", "gum", "instant_drink", "instant_noodles", "milk",
+             "personal_hygiene", "puffed_food", "seasoner", "stationery", "tissue"]
+
+    E.write_bundle(src, names, deploy)
+
+    assert (deploy / "m.tflite").read_bytes() == b"TFL3"
+    # classes.txt is DERIVED, one name per line, in index order
+    assert (deploy / "classes.txt").read_text(encoding="utf-8").splitlines() == names
+
+
+def test_write_bundle_rejects_wrong_class_count(tmp_path):
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3")
+    with pytest.raises(ValueError, match="17"):
+        E.write_bundle(src, ["only_one"], tmp_path / "deploy")
+
+
+def test_main_dry_returns_zero(monkeypatch):
+    import sys as _sys
+    monkeypatch.setattr(_sys, "argv", ["export_int8.py", "--dry"])
+    assert E.main() == 0

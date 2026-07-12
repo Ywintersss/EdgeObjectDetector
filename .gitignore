@@ -38,3 +38,8 @@ dataset_real/
 studio_coarse/
 dataset_real_blend.yml
 eval_single_item.yml
+
+# --- INT8 export artifacts (rebuildable; report.md is kept as a record) ---
+export/*.tflite
+deploy/*.tflite
+deploy/classes.txt
