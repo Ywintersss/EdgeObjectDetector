@@ -32,6 +32,15 @@ BASELINE = {"cluttered_map50": 0.995, "cluttered_map": 0.879,
 EXPECTED_CLASSES = 17
 
 
+class NotFullyIntegerError(ValueError):
+    """Raised when an exported artifact's graph I/O is not fully integer.
+
+    Kept as a ValueError subclass so any existing `except ValueError` handling keeps
+    working unmodified. Distinct from ValueError so `_run_sweep` can tell a FORMAT-level
+    failure (same cause at every size) apart from a genuinely size-specific one.
+    """
+
+
 def parse_sizes(text: str) -> list[int]:
     """Parse '640,448,320' -> [640, 448, 320]. Raises ValueError on anything not a positive int."""
     parts = [p.strip() for p in str(text).split(",") if p.strip()]
@@ -60,6 +69,11 @@ def load_class_names(yaml_path) -> list[str]:
     if not p.exists():
         raise FileNotFoundError(f"dataset yaml not found: {p}")
     doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+    # An empty or comment-only yaml parses to None, not {} -- doc["names"] would then
+    # raise a raw TypeError that main()'s except (KeyError, ValueError) does not catch,
+    # letting a traceback escape instead of the clean ERROR/return-1 pattern.
+    if doc is None:
+        raise ValueError(f"{p} is empty or contains no YAML mapping (expected a 'names' key)")
     names = doc["names"]
     if isinstance(names, dict):
         return [names[i] for i in sorted(names)]
@@ -112,7 +126,7 @@ def _assert_integer_io(in_dtype, out_dtype, name: str) -> None:
     if not offenders:
         return
     detail = ", ".join(f"{k}={np.dtype(v).name}" for k, v in offenders.items())
-    raise ValueError(
+    raise NotFullyIntegerError(
         f"{name} is NOT a fully-integer graph ({detail}; both must be int8/uint8). "
         "The Edge TPU executes only fully-integer models. Ultralytics' default "
         "'tflite' (LiteRT) export keeps float32 graph I/O even with int8=True. "
@@ -249,8 +263,11 @@ def build_report_table(rows: list[dict]) -> str:
     ]
     for r in sorted(rows, key=lambda x: -x["size"]):
         if r["status"] != "ok":
+            # Show the actual status (FAILED vs. SKIPPED) rather than hardcoding
+            # FAILED -- a size the sweep never attempted must never read as tested.
+            status = r["status"]
             lines.append(
-                f"| {r['size']} | FAILED | FAILED | — | FAILED | — | — | {r['error']} |")
+                f"| {r['size']} | {status} | {status} | — | {status} | — | — | {r['error']} |")
             continue
         delta = (r["cluttered_map"] - BASELINE["cluttered_map"]) * 100.0
         verdict = gate_verdict(BASELINE["cluttered_map"], r["cluttered_map"])
@@ -288,7 +305,8 @@ def _run_sweep(args, sizes: list[int]) -> int:
     """Export + validate each size, then write export/report.md. Returns an exit code."""
     out_dir = PROJECT_ROOT / "export"
     rows = []
-    for size in sizes:
+    aborted = False
+    for idx, size in enumerate(sizes):
         print(f"\n=== size {size}: exporting INT8 (calibrating on {args.calib}) ===")
         try:
             tflite = export_one_size(args.weights, size, args.calib, out_dir,
@@ -303,6 +321,29 @@ def _run_sweep(args, sizes: list[int]) -> int:
             })
             print(f"  size {size}: cluttered mAP@50-95 = {cluttered['map']:.3f} "
                   f"({gate_verdict(BASELINE['cluttered_map'], cluttered['map'])})")
+        except NotFullyIntegerError as exc:
+            # A FORMAT-level failure: the export produced float graph I/O, which has
+            # nothing to do with input resolution and will recur identically at every
+            # remaining size. Record this size as FAILED (never silently dropped), then
+            # stop -- burning ~10 GPU-minutes per remaining size to relearn the same
+            # fact is exactly the waste this guard exists to prevent.
+            print(f"ERROR: size {size} FAILED: {exc}", file=sys.stderr)
+            print(
+                "ERROR: this is a FORMAT-level failure (float graph I/O), not a "
+                "size-specific one -- it will recur identically at every remaining "
+                "size. Aborting the sweep instead of burning ~10 GPU-minutes per size "
+                "to relearn the same fact. Remedy: re-run with "
+                "--export-format saved_model.",
+                file=sys.stderr,
+            )
+            rows.append({"size": size, "status": "FAILED", "error": str(exc)})
+            for skipped_size in sizes[idx + 1:]:
+                rows.append({
+                    "size": skipped_size, "status": "SKIPPED",
+                    "error": f"sweep aborted after format-level failure at size {size}",
+                })
+            aborted = True
+            break
         except Exception as exc:  # noqa: BLE001 — one bad size must not kill the sweep
             print(f"ERROR: size {size} FAILED: {exc}", file=sys.stderr)
             rows.append({"size": size, "status": "FAILED", "error": str(exc)})
@@ -312,8 +353,9 @@ def _run_sweep(args, sizes: list[int]) -> int:
     report.write_text(build_report_table(rows), encoding="utf-8")
     print(f"\nWrote {report}")
 
-    # Non-zero exit if EVERY size failed — the sweep produced nothing usable.
-    return 1 if all(r["status"] != "ok" for r in rows) else 0
+    # Non-zero exit if the sweep was aborted, or if EVERY attempted size failed —
+    # in both cases the sweep produced nothing usable (or incomplete) to trust blindly.
+    return 1 if aborted or all(r["status"] != "ok" for r in rows) else 0
 
 
 def main() -> int:

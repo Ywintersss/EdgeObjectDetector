@@ -130,6 +130,59 @@ def test_run_loop_returns_nonzero_when_a_class_id_is_out_of_range(capsys):
     assert "stale classes.txt" in err
 
 
+class _DroppedCap:
+    """cv2.VideoCapture stand-in that immediately reports a dead camera."""
+
+    def read(self):
+        return False, None
+
+    def release(self):
+        pass
+
+
+class _OneFrameThenQuitCap:
+    """Yields one real frame, then acts as if the user pressed 'q'."""
+
+    def __init__(self):
+        import numpy as np
+        self._frame = np.full((32, 32, 3), 127, dtype="uint8")
+
+    def read(self):
+        return True, self._frame.copy()
+
+    def release(self):
+        pass
+
+
+class _NoopModel:
+    def predict(self, *a, **kw):
+        return []
+
+
+def test_run_loop_returns_nonzero_on_dropped_camera(capsys):
+    # cap.read() -> (False, None) means the camera died mid-session (unplugged /
+    # stream lost). Falling through to `return 0` would report SUCCESS to the shell
+    # for a session that actually failed -- a silent failure the project forbids.
+    rc = W.run_loop(_NoopModel(), _DroppedCap(), ["c"] * 17, conf=0.25)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    assert "WARNING" not in err
+
+
+def test_run_loop_returns_zero_on_clean_quit(monkeypatch):
+    # A user-initiated 'q' quit is NOT a failure and must still exit 0, distinct
+    # from a dropped camera. imshow is stubbed out -- this is a unit test with a
+    # fake capture, not the GUI webcam demo itself, so no window should pop up.
+    monkeypatch.setattr(W.cv2, "imshow", lambda *_a, **_kw: None)
+    monkeypatch.setattr(W.cv2, "waitKey", lambda *_a, **_kw: ord("q"))
+
+    rc = W.run_loop(_NoopModel(), _OneFrameThenQuitCap(), ["c"] * 17, conf=0.25)
+
+    assert rc == 0
+
+
 def test_resolve_model_path_finds_the_single_bundled_model(tmp_path):
     m = tmp_path / "rpc_coarse17_int8_448.tflite"
     m.write_bytes(b"TFL3")

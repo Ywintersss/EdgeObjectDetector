@@ -39,6 +39,17 @@ def test_load_class_names_missing_file_raises(tmp_path):
         E.load_class_names(tmp_path / "nope.yml")
 
 
+def test_load_class_names_empty_yaml_raises_value_error(tmp_path):
+    # yaml.safe_load on an empty/comment-only file returns None, so doc["names"]
+    # would raise a raw, uncaught TypeError. main()'s except (KeyError, ValueError)
+    # doesn't catch TypeError, so a traceback would escape instead of the clean
+    # ERROR/return-1 pattern used everywhere else.
+    y = tmp_path / "empty.yml"
+    y.write_text("# just a comment, no content\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=str(y).replace("\\", "\\\\")):
+        E.load_class_names(y)
+
+
 def test_gate_verdict_thresholds():
     # drop measured in percentage points of mAP@50-95 against the 0.879 baseline
     assert E.gate_verdict(0.879, 0.870) == "clean"        # 0.9 pt drop
@@ -187,6 +198,63 @@ def test_verify_full_integer_rejects_a_non_model_file(tmp_path):
     bad.write_bytes(b"not a flatbuffer")
     with pytest.raises((ValueError, RuntimeError)):
         E.verify_full_integer(bad)
+
+
+def test_not_fully_integer_error_is_a_value_error():
+    # Must stay a ValueError subclass so any existing `except ValueError` handling
+    # (e.g. _assert_integer_io's callers) keeps working unmodified.
+    assert issubclass(E.NotFullyIntegerError, ValueError)
+
+
+def test_assert_integer_io_raises_not_fully_integer_error_on_float_io():
+    # _run_sweep needs to distinguish "format is wrong" (abort the whole sweep)
+    # from "this one size broke" (keep going) -- that requires a distinct type,
+    # not just any ValueError.
+    with pytest.raises(E.NotFullyIntegerError):
+        E._assert_integer_io(np.float32, np.int8, "m.tflite")
+
+
+# --- sweep abort on a format-level failure -------------------------------------------
+# If verify_full_integer fails at one size, it fails for the SAME reason at every
+# size -- it is a FORMAT problem, not a resolution problem. Re-running the ~10-minute
+# export for the remaining sizes only proves the same fact again at real GPU cost.
+
+def test_run_sweep_aborts_after_first_not_fully_integer_error(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def _fake_export_one_size(weights, size, calib_yaml, out_dir, export_format="tflite"):
+        calls.append(size)
+        raise E.NotFullyIntegerError(f"{size} is NOT a fully-integer graph")
+
+    monkeypatch.setattr(E, "export_one_size", _fake_export_one_size)
+    monkeypatch.setattr(E, "PROJECT_ROOT", tmp_path)
+
+    class _Args:
+        weights = "w.pt"
+        calib = "calib.yml"
+        single = "single.yml"
+        export_format = "tflite"
+
+    rc = E._run_sweep(_Args(), [640, 448, 320])
+
+    # export_one_size must be attempted for 640 only -- 448/320 would just burn
+    # ~10 more GPU-minutes each to relearn the same format-level fact.
+    assert calls == [640]
+    assert rc != 0
+
+    err = capsys.readouterr().err
+    assert "FORMAT" in err or "format" in err
+    assert "--export-format saved_model" in err
+
+    report = (tmp_path / "export" / "report.md").read_text(encoding="utf-8")
+    # size 640 must be honestly reported as FAILED -- never silently omitted
+    assert "640" in report
+    assert "FAILED" in report
+    # 448/320 were never attempted -- the report must say so explicitly (SKIPPED),
+    # never silently omitted and never implying they passed or were tested.
+    assert "448" in report
+    assert "320" in report
+    assert "SKIPPED" in report
 
 
 def test_verify_class_count_accepts_17():
@@ -359,6 +427,33 @@ def test_main_bundle_does_not_require_single_yaml_or_sizes(monkeypatch, tmp_path
     assert rc == 0, capsys.readouterr().err
     assert (deploy_dir / "rpc_coarse17_int8_320.tflite").exists()
     assert (deploy_dir / "classes.txt").exists()
+
+
+def test_main_empty_calib_yaml_returns_clean_error(monkeypatch, tmp_path, capsys):
+    # An empty/comment-only --calib yaml must hit main()'s existing
+    # except (KeyError, ValueError) handler and print the clean ERROR pattern --
+    # not let a raw TypeError traceback escape.
+    import sys as _sys
+
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"fake-weights")
+    calib = tmp_path / "empty.yml"
+    calib.write_text("# nothing here\n", encoding="utf-8")
+    single = tmp_path / "single.yml"
+    single.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+
+    monkeypatch.setattr(_sys, "argv", [
+        "export_int8.py",
+        "--weights", str(weights),
+        "--calib", str(calib),
+        "--single", str(single),
+    ])
+
+    rc = E.main()
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "ERROR" in captured.err
 
 
 def test_main_yaml_without_names_key_returns_clean_error(monkeypatch, tmp_path, capsys):

@@ -119,8 +119,11 @@ def run_loop(model, cap, names, conf: float) -> int:
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("WARNING: dropped frame from camera", file=sys.stderr)
-            break
+            # A dead camera (unplugged / stream lost mid-session) is a FAILED
+            # session, not a clean exit -- falling through to `return 0` here would
+            # report success to the shell for a run that produced nothing further.
+            print("ERROR: camera dropped (unplugged or stream lost)", file=sys.stderr)
+            return 1
 
         try:
             detections = detect_frame(model, frame, conf=conf)
