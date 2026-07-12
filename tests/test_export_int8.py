@@ -137,3 +137,63 @@ def test_main_dry_returns_zero(monkeypatch):
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["export_int8.py", "--dry"])
     assert E.main() == 0
+
+
+def _class_names_17():
+    return ["alcohol", "candy", "canned_food", "chocolate", "dessert", "dried_food",
+            "dried_fruit", "drink", "gum", "instant_drink", "instant_noodles", "milk",
+            "personal_hygiene", "puffed_food", "seasoner", "stationery", "tissue"]
+
+
+def test_main_missing_single_yaml_fails_fast(monkeypatch, tmp_path, capsys):
+    # main() must reject a missing --single yaml BEFORE any expensive export/val
+    # work happens, per the spec's "no silent failures" fail-fast requirement.
+    import sys as _sys
+
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"fake-weights")
+    calib = tmp_path / "calib.yml"
+    calib.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+    missing_single = tmp_path / "eval_single_item.yml"  # deliberately never created
+
+    _sys.argv = [
+        "export_int8.py",
+        "--weights", str(weights),
+        "--calib", str(calib),
+        "--single", str(missing_single),
+    ]
+    monkeypatch.setattr(_sys, "argv", _sys.argv)
+
+    rc = E.main()
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "ERROR" in captured.err
+    assert str(missing_single) in captured.err
+
+
+def test_main_malformed_sizes_fails_fast(monkeypatch, tmp_path, capsys):
+    # A bad --sizes value must produce the clean ERROR-to-stderr pattern used
+    # everywhere else in main(), not an uncaught ValueError/traceback.
+    import sys as _sys
+
+    weights = tmp_path / "best.pt"
+    weights.write_bytes(b"fake-weights")
+    calib = tmp_path / "calib.yml"
+    calib.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+    single = tmp_path / "eval_single_item.yml"
+    single.write_text(yaml.safe_dump({"nc": 17, "names": _class_names_17()}), encoding="utf-8")
+
+    monkeypatch.setattr(_sys, "argv", [
+        "export_int8.py",
+        "--weights", str(weights),
+        "--calib", str(calib),
+        "--single", str(single),
+        "--sizes", "abc",
+    ])
+
+    rc = E.main()
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "ERROR" in captured.err

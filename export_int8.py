@@ -170,11 +170,11 @@ def write_bundle(tflite_path, names: list[str], deploy_dir) -> None:
     (deploy_dir / "classes.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
 
 
-def _run_sweep(args) -> int:
+def _run_sweep(args, sizes: list[int]) -> int:
     """Export + validate each size, then write export/report.md. Returns an exit code."""
     out_dir = PROJECT_ROOT / "export"
     rows = []
-    for size in parse_sizes(args.sizes):
+    for size in sizes:
         print(f"\n=== size {size}: exporting INT8 (calibrating on {args.calib}) ===")
         try:
             tflite = export_one_size(args.weights, size, args.calib, out_dir)
@@ -219,16 +219,26 @@ def main() -> int:
 
     weights = Path(args.weights)
     calib = Path(args.calib)
+    single = Path(args.single)
     if not weights.exists():
         print(f"ERROR: weights not found: {weights}", file=sys.stderr)
         return 1
     if not calib.exists():
         print(f"ERROR: calibration yaml not found: {calib}", file=sys.stderr)
         return 1
+    if not single.exists():
+        print(f"ERROR: single-item eval yaml not found: {single}", file=sys.stderr)
+        return 1
 
     names = load_class_names(calib)
     try:
         verify_class_count(names)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        sizes = parse_sizes(args.sizes)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -242,7 +252,7 @@ def main() -> int:
         print(f"Bundled {tflite.name} + classes.txt -> deploy/")
         return 0
 
-    return _run_sweep(args)
+    return _run_sweep(args, sizes)
 
 
 if __name__ == "__main__":
