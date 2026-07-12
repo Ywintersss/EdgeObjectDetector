@@ -66,7 +66,11 @@ def gate_verdict(baseline_map: float, model_map: float) -> str:
     Drop is in PERCENTAGE POINTS of mAP@50-95: <2 clean, 2-5 acceptable, >5 RED FLAG.
     A RED FLAG means the first suspect is the calibration data, not the input size.
     """
-    drop_points = (baseline_map - model_map) * 100.0
+    # Round before comparing: raw float64 arithmetic can drift an exact 5.0pt
+    # drop to 5.000000000000004, which would wrongly fail the <=5.0 test and
+    # trigger a false RED FLAG. Precision to 1e-9 is far tighter than the
+    # spec's 0.1pt reporting granularity, so it only absorbs float noise.
+    drop_points = round((baseline_map - model_map) * 100.0, 9)
     if drop_points < 2.0:
         return "clean"
     if drop_points <= 5.0:
@@ -92,7 +96,7 @@ def build_report_table(rows: list[dict]) -> str:
     for r in sorted(rows, key=lambda x: -x["size"]):
         if r["status"] != "ok":
             lines.append(
-                f"| {r['size']} | FAILED | FAILED | — | FAILED | — | — | {r.get('error', '')} |")
+                f"| {r['size']} | FAILED | FAILED | — | FAILED | — | — | {r['error']} |")
             continue
         delta = (r["cluttered_map"] - BASELINE["cluttered_map"]) * 100.0
         verdict = gate_verdict(BASELINE["cluttered_map"], r["cluttered_map"])

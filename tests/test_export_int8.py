@@ -71,3 +71,20 @@ def test_build_report_table_marks_failed_rows():
     assert "onnx2tf blew up" in md
     # a failed size must never be silently omitted
     assert "640" in md
+
+
+def test_gate_verdict_exact_2_0_point_drop_is_acceptable():
+    # Built from real baseline arithmetic (not a pre-rounded literal) so any
+    # float drift in (baseline - model) * 100.0 is actually exercised.
+    baseline = 0.879
+    model_map = baseline - 0.02
+    assert E.gate_verdict(baseline, model_map) == "acceptable"
+
+
+def test_gate_verdict_exact_5_0_point_drop_is_acceptable():
+    # 0.879 - 0.05 -> (baseline - model) * 100.0 drifts to 5.000000000000004
+    # in raw float64 arithmetic, which must still land in "acceptable", not
+    # "RED FLAG".
+    baseline = 0.879
+    model_map = baseline - 0.05
+    assert E.gate_verdict(baseline, model_map) == "acceptable"
