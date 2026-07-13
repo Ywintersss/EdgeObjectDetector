@@ -88,6 +88,19 @@ def test_build_report_table_states_calibration_eval_overlap_caveat():
     assert "lower bound" in lowered or "optimistic" in lowered
 
 
+def test_build_report_table_states_the_resolution_confound():
+    # The FP32 baseline (0.879) was measured at imgsz 640 -- the model's training size.
+    # So for any size BELOW 640 the Δ column sums TWO costs: quantization AND
+    # downscaling. Only the 640 row isolates quantization. Without this stated, a reader
+    # sees "-12.1 / RED FLAG" at 320 and goes hunting a calibration bug that isn't there
+    # (the spec literally directs them to suspect calibration first, not input size).
+    md = E.build_report_table([])
+    lowered = md.lower()
+    assert "640" in lowered
+    assert "resolution" in lowered or "downscal" in lowered
+    assert "only the 640 row" in lowered
+
+
 def test_build_report_table_marks_failed_rows():
     rows = [{"size": 640, "status": "FAILED", "error": "onnx2tf blew up"}]
     md = E.build_report_table(rows)
@@ -114,9 +127,14 @@ def test_gate_verdict_exact_5_0_point_drop_is_acceptable():
     assert E.gate_verdict(baseline, model_map) == "acceptable"
 
 
-def test_build_export_kwargs_forces_int8_and_real_calibration():
+def test_build_export_kwargs_defaults_to_edgetpu():
+    # MUST default to edgetpu. Ultralytics applies the INT8 box-normalization
+    # mitigation (tf_wrapper/_tf_decode_boxes) ONLY when fmt == "edgetpu"
+    # (exporter.py). On any other format the boxes stay in PIXEL units, which forces
+    # the shared output-tensor scale up to ~1.77 and quantizes every class score to
+    # {0, 1.77} -- measured, and it produced mAP 0.000 on both splits.
     kw = E.build_export_kwargs(320, "dataset_real_blend.yml")
-    assert kw["format"] == "tflite"
+    assert kw["format"] == "edgetpu"
     assert kw["int8"] is True          # Coral runs ONLY fully-integer models
     assert kw["imgsz"] == 320
     # calibration MUST read the real cluttered deployment distribution
@@ -124,9 +142,8 @@ def test_build_export_kwargs_forces_int8_and_real_calibration():
 
 
 def test_build_export_kwargs_honors_export_format():
-    # The escape hatch: if the default (litert) path emits float32 graph I/O, the
-    # user must be able to rerun via saved_model to get *_full_integer_quant.tflite,
-    # which is what the Edge TPU compiler actually consumes.
+    # Other formats stay reachable for diagnosis (e.g. exporting a float32 reference
+    # to bisect a conversion bug against), but they are NOT the INT8 deploy path.
     kw = E.build_export_kwargs(448, "dataset_real_blend.yml", export_format="saved_model")
     assert kw["format"] == "saved_model"
     assert kw["int8"] is True          # still non-negotiable on the alternate path
@@ -150,7 +167,7 @@ def test_assert_integer_io_rejects_float_input():
         E._assert_integer_io(np.float32, np.int8, "m.tflite")
     msg = str(exc.value)
     assert "float32" in msg                    # names the ACTUAL dtype seen
-    assert "--export-format saved_model" in msg  # names the remedy, at the moment of need
+    assert "--export-format edgetpu" in msg    # names the remedy, at the moment of need
 
 
 def test_assert_integer_io_rejects_float_output():
@@ -158,7 +175,7 @@ def test_assert_integer_io_rejects_float_output():
         E._assert_integer_io(np.int8, np.float32, "m.tflite")
     msg = str(exc.value)
     assert "float32" in msg
-    assert "--export-format saved_model" in msg
+    assert "--export-format edgetpu" in msg
 
 
 def test_assert_integer_io_rejects_float_both():
@@ -214,6 +231,73 @@ def test_assert_integer_io_raises_not_fully_integer_error_on_float_io():
         E._assert_integer_io(np.float32, np.int8, "m.tflite")
 
 
+# --- output score resolution ---------------------------------------------------------
+# An integer-I/O graph can still be USELESS. The output tensor concatenates box coords
+# with class scores, so per-tensor INT8 quantization picks ONE scale for both. Exporting
+# without the edgetpu box-normalization leaves boxes in PIXEL units (0..425), which drags
+# that shared scale up to 1.77 -- coarser than the entire 0..1 probability range. Every
+# confidence then collapses to {0, 1.77} and NOTHING is ever detected.
+#
+# These are the REAL measured scales from the broken and healthy exports, not invented
+# numbers: verify_full_integer() passed the broken artifact happily (its dtypes ARE int8)
+# and the damage only surfaced as mAP 0.000 after a full export + two val passes.
+
+def test_assert_score_resolution_rejects_the_collapsed_scale():
+    # 1.7716667652130127 is the scale measured on the artifact that scored mAP 0.000.
+    with pytest.raises(E.ScoreResolutionError) as exc:
+        E._assert_score_resolution(1.7716667652130127, "m.tflite")
+    msg = str(exc.value)
+    assert "1.77" in msg                        # names the ACTUAL scale seen
+    assert "--export-format edgetpu" in msg     # names the remedy, at the moment of need
+
+
+def test_assert_score_resolution_accepts_a_normalized_scale():
+    # 0.003921568859368563 (== 1/255) is the scale a correctly normalized export gives:
+    # ~256 levels across the 0..1 probability range.
+    E._assert_score_resolution(0.003921568859368563, "m.tflite")   # must not raise
+
+
+def test_assert_score_resolution_boundary_is_inclusive():
+    E._assert_score_resolution(E.MAX_OUTPUT_SCALE, "m.tflite")     # exactly at limit: OK
+    with pytest.raises(E.ScoreResolutionError):
+        E._assert_score_resolution(E.MAX_OUTPUT_SCALE * 1.01, "m.tflite")
+
+
+def test_score_resolution_error_is_format_level():
+    # Same reasoning as NotFullyIntegerError: a coarse output scale is caused by the
+    # export FORMAT, so it recurs identically at every size. The sweep must abort, not
+    # re-burn ~10 GPU-minutes per remaining size to relearn it.
+    assert issubclass(E.ScoreResolutionError, E.FormatLevelExportError)
+    assert issubclass(E.ScoreResolutionError, ValueError)
+
+
+def test_not_fully_integer_error_is_format_level():
+    assert issubclass(E.NotFullyIntegerError, E.FormatLevelExportError)
+
+
+def test_resolve_export_artifact_maps_edgetpu_file_to_its_cpu_sibling(tmp_path):
+    # format="edgetpu" returns the COMPILED *_edgetpu.tflite, which only runs with a
+    # real Edge TPU delegate attached -- val() on the desktop (and the laptop demo)
+    # would fail on it. The CPU-runnable sibling is what we measure and bundle.
+    d = tmp_path / "best_saved_model"
+    d.mkdir()
+    cpu = d / "best_full_integer_quant.tflite"
+    cpu.write_bytes(b"TFL3")
+    compiled = d / "best_full_integer_quant_edgetpu.tflite"
+    compiled.write_bytes(b"TFL3-tpu")
+
+    assert E._resolve_export_artifact(compiled) == cpu
+
+
+def test_resolve_export_artifact_edgetpu_file_without_sibling_raises(tmp_path):
+    d = tmp_path / "best_saved_model"
+    d.mkdir()
+    compiled = d / "best_full_integer_quant_edgetpu.tflite"
+    compiled.write_bytes(b"TFL3-tpu")
+    with pytest.raises(ValueError, match="full_integer_quant"):
+        E._resolve_export_artifact(compiled)
+
+
 # --- sweep abort on a format-level failure -------------------------------------------
 # If verify_full_integer fails at one size, it fails for the SAME reason at every
 # size -- it is a FORMAT problem, not a resolution problem. Re-running the ~10-minute
@@ -222,7 +306,7 @@ def test_assert_integer_io_raises_not_fully_integer_error_on_float_io():
 def test_run_sweep_aborts_after_first_not_fully_integer_error(monkeypatch, tmp_path, capsys):
     calls = []
 
-    def _fake_export_one_size(weights, size, calib_yaml, out_dir, export_format="tflite"):
+    def _fake_export_one_size(weights, size, calib_yaml, out_dir, export_format="edgetpu"):
         calls.append(size)
         raise E.NotFullyIntegerError(f"{size} is NOT a fully-integer graph")
 
@@ -233,7 +317,7 @@ def test_run_sweep_aborts_after_first_not_fully_integer_error(monkeypatch, tmp_p
         weights = "w.pt"
         calib = "calib.yml"
         single = "single.yml"
-        export_format = "tflite"
+        export_format = "edgetpu"
 
     rc = E._run_sweep(_Args(), [640, 448, 320])
 
@@ -244,7 +328,6 @@ def test_run_sweep_aborts_after_first_not_fully_integer_error(monkeypatch, tmp_p
 
     err = capsys.readouterr().err
     assert "FORMAT" in err or "format" in err
-    assert "--export-format saved_model" in err
 
     report = (tmp_path / "export" / "report.md").read_text(encoding="utf-8")
     # size 640 must be honestly reported as FAILED -- never silently omitted
@@ -255,6 +338,35 @@ def test_run_sweep_aborts_after_first_not_fully_integer_error(monkeypatch, tmp_p
     assert "448" in report
     assert "320" in report
     assert "SKIPPED" in report
+
+
+def test_run_sweep_aborts_after_a_score_resolution_error(monkeypatch, tmp_path, capsys):
+    # A collapsed output scale is caused by the export FORMAT, so it recurs at every
+    # size. This is the failure that actually happened: it cost a full export plus two
+    # val passes per size before surfacing as mAP 0.000.
+    calls = []
+
+    def _fake_export_one_size(weights, size, calib_yaml, out_dir, export_format="edgetpu"):
+        calls.append(size)
+        raise E.ScoreResolutionError(f"{size}: output scale 1.77 collapses class scores")
+
+    monkeypatch.setattr(E, "export_one_size", _fake_export_one_size)
+    monkeypatch.setattr(E, "PROJECT_ROOT", tmp_path)
+
+    class _Args:
+        weights = "w.pt"
+        calib = "calib.yml"
+        single = "single.yml"
+        export_format = "saved_model"
+
+    rc = E._run_sweep(_Args(), [640, 448, 320])
+
+    assert calls == [640]          # 448/320 must NOT be attempted
+    assert rc != 0
+
+    report = (tmp_path / "export" / "report.md").read_text(encoding="utf-8")
+    assert "FAILED" in report      # 640 reported honestly
+    assert "SKIPPED" in report      # 448/320 never claimed as tested
 
 
 def test_verify_class_count_accepts_17():

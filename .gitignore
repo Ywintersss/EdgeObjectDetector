@@ -39,6 +39,13 @@ studio_coarse/
 dataset_real_blend.yml
 eval_single_item.yml
 
+# WSL twins of the dataset yamls: same absolute-machine-path problem as the originals
+# above, just with /mnt/d instead of D:/. Regenerate by rewriting the drive prefix.
+*.wsl.yml
+
+# Ultralytics downloads this into the repo root during INT8 export.
+calibration_image_sample_data_*.npy
+
 # --- INT8 export artifacts (rebuildable; report.md is kept as a record) ---
 export/*.tflite
 deploy/*.tflite

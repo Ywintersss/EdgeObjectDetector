@@ -6,14 +6,27 @@ Usage:
     python export_int8.py --sizes 320                  # validate the toolchain first (fast)
     python export_int8.py --sizes 640,448,320          # full sweep -> export/report.md
     python export_int8.py --bundle 320                 # assemble deploy/ for the laptop
-    python export_int8.py --sizes 320 --export-format saved_model   # if graph I/O is float
+
+Requires Linux x86 + edgetpu_compiler (WSL2 is fine); check with `edgetpu_compiler --version`.
 
 INT8 calibration reads REAL cluttered images (dataset_real_blend.yml). Calibrating on
 the wrong distribution silently costs accuracy that looks like "quantization is lossy".
 
-Every exported artifact is checked with verify_full_integer(): int8=True alone does NOT
-guarantee an integer-I/O graph on current Ultralytics, and the Edge TPU accepts nothing
-else. If that check fails, re-run with --export-format saved_model.
+WHY format="edgetpu" IS MANDATORY, not merely one option among several:
+Ultralytics applies its INT8 box-normalization mitigation (tf_wrapper/_tf_decode_boxes,
+which scales boxes to 0..1) under `if fmt == "edgetpu"` and NOWHERE else. Export via
+"tflite" or "saved_model" and the boxes stay in PIXEL units (0..425). The detect head
+concatenates boxes and class scores into ONE output tensor, so per-tensor INT8
+quantization must pick a single scale for both -- and pixel-scale boxes drag that scale
+to ~1.77, coarser than the entire 0..1 probability range. Every class score then
+quantizes to {0, 1.77}, nothing clears the confidence threshold, and the model scores
+mAP 0.000 on every split while looking perfectly healthy: right shape, right dtypes,
+right file size, 4 ms latency. Measured, not theorized.
+
+Two artifact-level guards run on every export, because a green flag proves nothing:
+  verify_full_integer()    - graph I/O really is int8/uint8 (the Edge TPU accepts no other)
+  verify_score_resolution() - the output scale can still REPRESENT a confidence
+The second exists because the first passed the mAP-0.000 model happily.
 """
 
 import argparse
@@ -31,13 +44,36 @@ BASELINE = {"cluttered_map50": 0.995, "cluttered_map": 0.879,
 
 EXPECTED_CLASSES = 17
 
+# Coarsest usable quantization step for the output tensor, which carries class
+# probabilities in 0..1. At 0.05 a confidence still has ~20 levels — plenty to clear a
+# 0.25 threshold. A correct (box-normalized) export measures ~0.0039 (1/255, ~256
+# levels); the broken pixel-box export measured 1.77, which cannot represent ANY
+# probability. The gap between right and wrong is ~450x, so this bound is not delicate.
+MAX_OUTPUT_SCALE = 0.05
 
-class NotFullyIntegerError(ValueError):
-    """Raised when an exported artifact's graph I/O is not fully integer.
 
-    Kept as a ValueError subclass so any existing `except ValueError` handling keeps
-    working unmodified. Distinct from ValueError so `_run_sweep` can tell a FORMAT-level
-    failure (same cause at every size) apart from a genuinely size-specific one.
+class FormatLevelExportError(ValueError):
+    """An export failure caused by the FORMAT, so it recurs identically at every size.
+
+    `_run_sweep` aborts on these instead of re-running a ~10-minute export per remaining
+    size to relearn the same fact. Size-specific failures stay ordinary exceptions and
+    let the sweep continue.
+
+    A ValueError subclass so existing `except ValueError` handling keeps working.
+    """
+
+
+class NotFullyIntegerError(FormatLevelExportError):
+    """Raised when an exported artifact's graph I/O is not fully integer."""
+
+
+class ScoreResolutionError(FormatLevelExportError):
+    """Raised when the output tensor's INT8 scale is too coarse to encode a confidence.
+
+    The failure this catches is silent: the artifact is a valid, fully-integer,
+    correctly-shaped TFLite model that detects NOTHING, because every class score has
+    been quantized to a two-value set. It cost a full export plus two val passes to
+    surface as mAP 0.000; this guard catches it from the artifact alone, in seconds.
     """
 
 
@@ -98,18 +134,17 @@ def gate_verdict(baseline_map: float, model_map: float) -> str:
     return "RED FLAG"
 
 
-def build_export_kwargs(size: int, calib_yaml: str, export_format: str = "tflite") -> dict:
+def build_export_kwargs(size: int, calib_yaml: str, export_format: str = "edgetpu") -> dict:
     """Ultralytics export kwargs for a fully-integer TFLite model.
 
     int8=True is non-negotiable: the Edge TPU executes ONLY fully-integer models.
     `data` supplies the calibration images that set the quantization ranges.
 
-    `export_format` is the escape hatch. Ultralytics >=8.4.83 silently rewrites
-    format="tflite" to its LiteRT path, which quantizes weights/activations to int8
-    but DELIBERATELY leaves the graph input/output float32 — which the Edge TPU
-    compiler cannot consume. format="saved_model" instead produces the
-    *_full_integer_quant.tflite artifact that it can. verify_full_integer() below is
-    what actually catches the difference; this is how you then fix it.
+    format="edgetpu" is equally non-negotiable, and NOT merely because we target Coral:
+    it is the only format for which Ultralytics applies the INT8 box-normalization that
+    keeps class scores representable at all (see the module docstring). Exporting INT8
+    via "tflite" or "saved_model" yields a model that detects nothing. The other formats
+    stay reachable only for diagnosis (e.g. a float32 reference to bisect against).
     """
     return {"format": export_format, "int8": True, "imgsz": size, "data": calib_yaml}
 
@@ -128,49 +163,97 @@ def _assert_integer_io(in_dtype, out_dtype, name: str) -> None:
     detail = ", ".join(f"{k}={np.dtype(v).name}" for k, v in offenders.items())
     raise NotFullyIntegerError(
         f"{name} is NOT a fully-integer graph ({detail}; both must be int8/uint8). "
-        "The Edge TPU executes only fully-integer models. Ultralytics' default "
-        "'tflite' (LiteRT) export keeps float32 graph I/O even with int8=True. "
-        "Remedy: re-run with --export-format saved_model, which produces the "
-        "*_full_integer_quant.tflite artifact the Edge TPU compiler consumes.")
+        "The Edge TPU executes only fully-integer models. "
+        "Remedy: re-run with --export-format edgetpu.")
 
 
-def verify_full_integer(tflite_path) -> None:
-    """Open the PRODUCED artifact and assert its graph I/O is fully integer.
+def _assert_score_resolution(out_scale: float, name: str) -> None:
+    """Raise unless the output tensor's INT8 scale can still encode a confidence.
 
-    We assert on the ARTIFACT, not on the export kwargs: int8=True is now merely
-    deprecated sugar for quantize=8, and no longer implies integer graph I/O.
+    Pure, so the arithmetic is unit-testable without a real model — the artifact-opening
+    half lives in verify_score_resolution().
+
+    The output tensor holds box coords AND class probabilities under ONE shared scale.
+    Without edgetpu's box normalization the boxes arrive in pixel units and force that
+    scale far above 1.0, at which point every probability rounds to a two-value set and
+    the model detects nothing while appearing entirely healthy.
     """
+    if out_scale <= MAX_OUTPUT_SCALE:
+        return
+    levels = 1.0 / out_scale if out_scale else float("inf")
+    raise ScoreResolutionError(
+        f"{name} has an output quantization scale of {out_scale:.4f} — too coarse to "
+        f"represent a class confidence (only ~{levels:.1f} levels across the 0..1 "
+        f"probability range; the limit is {MAX_OUTPUT_SCALE}). Class scores have "
+        "collapsed to a near-binary set, so this model will detect NOTHING and score "
+        "mAP 0.000 despite being a valid, correctly-shaped, fully-integer TFLite file. "
+        "Cause: the boxes were left in PIXEL units, dragging up the scale shared by "
+        "boxes and scores. Remedy: re-run with --export-format edgetpu, the only format "
+        "for which Ultralytics normalizes the boxes to 0..1.")
+
+
+def _open_interpreter(path: Path):
+    """Open a .tflite with whichever LiteRT interpreter is installed."""
     try:
         from ai_edge_litert.interpreter import Interpreter
     except ImportError:
         try:
             from tensorflow.lite.python.interpreter import Interpreter
         except ImportError as exc:
-            # Never skip this check: silently passing on the project's one
-            # non-negotiable constraint is worse than a loud failure.
+            # Never skip the artifact checks: silently passing on the project's
+            # non-negotiable constraints is worse than a loud failure.
             raise RuntimeError(
-                "cannot verify the exported model is fully integer: no LiteRT "
-                "interpreter available. Install one: pip install ai-edge-litert"
+                "cannot verify the exported model: no LiteRT interpreter available. "
+                "Install one: pip install ai-edge-litert"
             ) from exc
 
-    path = Path(tflite_path)
     interpreter = Interpreter(model_path=str(path))
     interpreter.allocate_tensors()
+    return interpreter
+
+
+def verify_full_integer(tflite_path) -> None:
+    """Open the PRODUCED artifact and assert its graph I/O is fully integer.
+
+    We assert on the ARTIFACT, not on the export kwargs: int8=True is merely deprecated
+    sugar for quantize=8, and does not by itself imply integer graph I/O.
+    """
+    path = Path(tflite_path)
+    interpreter = _open_interpreter(path)
     in_dtype = interpreter.get_input_details()[0]["dtype"]
     out_dtype = interpreter.get_output_details()[0]["dtype"]
     _assert_integer_io(in_dtype, out_dtype, path.name)
 
 
-def _resolve_export_artifact(produced: Path) -> Path:
-    """Normalize what model.export() returned to a single .tflite FILE.
+def verify_score_resolution(tflite_path) -> None:
+    """Open the PRODUCED artifact and assert its output scale can encode a confidence.
 
-    Some export paths return a `*_saved_model/` DIRECTORY, which shutil.copy2 would
-    choke on with IsADirectoryError. The Edge-TPU-relevant file inside it is the
-    *_full_integer_quant.tflite one.
+    verify_full_integer() is not enough on its own: it passed the mAP-0.000 model
+    without complaint, because that model's dtypes really were int8. Integer-ness and
+    usability are different properties, and only this one is about detection surviving.
+    """
+    path = Path(tflite_path)
+    interpreter = _open_interpreter(path)
+    out = interpreter.get_output_details()[0]
+    scale = float(out["quantization"][0])
+    _assert_score_resolution(scale, path.name)
+
+
+def _resolve_export_artifact(produced: Path) -> Path:
+    """Normalize what model.export() returned to the CPU-runnable, fully-integer .tflite.
+
+    Three shapes arrive here:
+      - a plain .tflite FILE            -> use it
+      - a `*_saved_model/` DIRECTORY    -> the *_full_integer_quant.tflite inside it
+      - a compiled `*_edgetpu.tflite`   -> its CPU-runnable sibling
+
+    That last case is the one format="edgetpu" actually returns. The compiled file only
+    executes with a real Edge TPU delegate attached, so validating it on this desktop
+    (and running it in the laptop demo) would fail. Its sibling — the same quantized
+    graph, uncompiled — is what we measure and bundle. The compiled file is preserved
+    separately by export_one_size() for the board.
     """
     produced = Path(produced)
-    if produced.is_file():
-        return produced
     if produced.is_dir():
         candidates = sorted(produced.glob("*_full_integer_quant.tflite"))
         if not candidates:
@@ -179,6 +262,16 @@ def _resolve_export_artifact(produced: Path) -> Path:
                 f"*_full_integer_quant.tflite — the Edge TPU needs a fully-integer "
                 f"artifact. Found: {[p.name for p in produced.glob('*.tflite')]}")
         return candidates[0]
+    if produced.is_file():
+        if produced.name.endswith("_edgetpu.tflite"):
+            sibling = produced.with_name(produced.name[: -len("_edgetpu.tflite")] + ".tflite")
+            if not sibling.exists():
+                raise ValueError(
+                    f"edgetpu compile produced {produced.name} but its CPU-runnable "
+                    f"sibling {sibling.name} (the *_full_integer_quant.tflite the "
+                    f"compiler consumed) is missing — nothing can be validated.")
+            return sibling
+        return produced
     raise FileNotFoundError(f"export produced nothing at {produced}")
 
 
@@ -194,7 +287,7 @@ def verify_class_count(names: list[str]) -> None:
 
 
 def export_one_size(weights, size: int, calib_yaml: str, out_dir: Path,
-                    export_format: str = "tflite") -> Path:
+                    export_format: str = "edgetpu") -> Path:
     """Export weights -> INT8 TFLite at `size`. Returns the path of the copied artifact."""
     import shutil
 
@@ -210,17 +303,24 @@ def export_one_size(weights, size: int, calib_yaml: str, out_dir: Path,
     # metadata is missing).
     verify_class_count(list(model.names.values()))
 
-    produced = _resolve_export_artifact(
-        Path(model.export(**build_export_kwargs(size, str(calib_yaml), export_format))))
+    returned = Path(model.export(**build_export_kwargs(size, str(calib_yaml), export_format)))
+    produced = _resolve_export_artifact(returned)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"rpc_coarse17_int8_{size}.tflite"
     shutil.copy2(produced, dest)
 
-    # Assert the ARTIFACT, not the flag: int8=True no longer guarantees integer
-    # graph I/O. A failure here propagates to _run_sweep's per-size handler, which
-    # records FAILED and keeps the row in the report. Do not swallow it.
+    # Keep the compiled Edge TPU binary too — it is the artifact the board actually
+    # runs, and re-exporting to recover it would cost the full export again. It cannot
+    # be validated here (it needs a real TPU delegate), so it is preserved, not measured.
+    if returned.is_file() and returned.name.endswith("_edgetpu.tflite"):
+        shutil.copy2(returned, out_dir / f"rpc_coarse17_int8_{size}_edgetpu.tflite")
+
+    # Assert the ARTIFACT, not the flag — and assert BOTH properties. A model can be
+    # perfectly integer and still detect nothing (see ScoreResolutionError). Failures
+    # here propagate to _run_sweep, which records FAILED. Do not swallow them.
     verify_full_integer(dest)
+    verify_score_resolution(dest)
     return dest
 
 
@@ -256,6 +356,13 @@ def build_report_table(rows: list[dict]) -> str:
         "calibrates from the `val:` split, which `dataset_real_blend.yml` points at "
         "`real_eval`). Quantization ranges are therefore tuned on the very images the "
         "quantization cost is measured against; on unseen scenes expect a larger drop.",
+        "",
+        "**Caveat — Δ is NOT purely the quantization cost below 640.** The FP32 baseline "
+        "was measured at imgsz **640** (the training size), so for any smaller size the "
+        "Δ column sums TWO costs: quantization AND the resolution drop. **Only the 640 "
+        "row isolates quantization.** Read a large Δ at 320/448 as a resolution "
+        "trade-off first — a falling mAP@50-95 while mAP@50 holds up is looser boxes "
+        "(resolution), not damaged scores (quantization).",
         "",
         "| Size | Cluttered mAP@50 | Cluttered mAP@50-95 | Δ vs FP32 (pts) | Gate | "
         "Single mAP@50-95 | File | CPU latency |",
@@ -321,19 +428,18 @@ def _run_sweep(args, sizes: list[int]) -> int:
             })
             print(f"  size {size}: cluttered mAP@50-95 = {cluttered['map']:.3f} "
                   f"({gate_verdict(BASELINE['cluttered_map'], cluttered['map'])})")
-        except NotFullyIntegerError as exc:
-            # A FORMAT-level failure: the export produced float graph I/O, which has
-            # nothing to do with input resolution and will recur identically at every
-            # remaining size. Record this size as FAILED (never silently dropped), then
-            # stop -- burning ~10 GPU-minutes per remaining size to relearn the same
-            # fact is exactly the waste this guard exists to prevent.
+        except FormatLevelExportError as exc:
+            # A FORMAT-level failure (float graph I/O, or an output scale too coarse to
+            # encode a confidence). Neither has anything to do with input resolution, so
+            # both recur identically at every remaining size. Record this size as FAILED
+            # (never silently dropped), then stop -- burning ~10 GPU-minutes per
+            # remaining size to relearn the same fact is exactly the waste this prevents.
             print(f"ERROR: size {size} FAILED: {exc}", file=sys.stderr)
             print(
-                "ERROR: this is a FORMAT-level failure (float graph I/O), not a "
-                "size-specific one -- it will recur identically at every remaining "
-                "size. Aborting the sweep instead of burning ~10 GPU-minutes per size "
-                "to relearn the same fact. Remedy: re-run with "
-                "--export-format saved_model.",
+                "ERROR: this is a FORMAT-level failure, not a size-specific one -- it "
+                "will recur identically at every remaining size. Aborting the sweep "
+                "instead of burning ~10 GPU-minutes per size to relearn the same fact. "
+                "The remedy is named in the error above.",
                 file=sys.stderr,
             )
             rows.append({"size": size, "status": "FAILED", "error": str(exc)})
@@ -367,10 +473,12 @@ def main() -> int:
     p.add_argument("--single", default="eval_single_item.yml",
                    help="Single-item eval yaml.")
     p.add_argument("--sizes", default="640,448,320")
-    p.add_argument("--export-format", default="tflite", choices=["tflite", "saved_model"],
-                   help="Ultralytics export format. Use saved_model if the default "
-                        "'tflite' (LiteRT) path emits a float32-I/O graph the Edge TPU "
-                        "cannot consume.")
+    p.add_argument("--export-format", default="edgetpu",
+                   choices=["edgetpu", "tflite", "saved_model"],
+                   help="Ultralytics export format. Leave this alone: 'edgetpu' is the "
+                        "ONLY format for which Ultralytics normalizes the boxes, and "
+                        "without that the INT8 class scores collapse and the model "
+                        "detects nothing (mAP 0.000). The others are for diagnosis only.")
     p.add_argument("--bundle", type=int, default=None,
                    help="Assemble deploy/ from the already-exported model of this size.")
     p.add_argument("--dry", action="store_true", help="Parse args and exit (test hook).")
