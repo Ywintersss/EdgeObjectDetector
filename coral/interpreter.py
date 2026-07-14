@@ -21,6 +21,20 @@ EDGETPU_LIB = {
     "Windows": "edgetpu.dll",
 }
 
+# edgetpu_compiler always embeds a custom op with this name into the compiled flatbuffer.
+# Its presence/absence is a reliable, hardware-free way to tell a compiled *_edgetpu.tflite
+# apart from an ordinary .tflite -- which is what make_interpreter uses it for below.
+EDGETPU_CUSTOM_OP = b"edgetpu-custom-op"
+
+
+def is_edgetpu_compiled(model_path):
+    """-> bool: whether model_path was run through edgetpu_compiler.
+
+    Pure byte check, no runtime and no hardware involved -- that is what makes it
+    testable on the desktop.
+    """
+    return EDGETPU_CUSTOM_OP in Path(model_path).read_bytes()
+
 
 def _load_runtime():
     """-> (Interpreter, load_delegate) from whichever TFLite runtime is installed."""
@@ -61,6 +75,19 @@ def make_interpreter(model_path, use_tpu):
         it = Interpreter(model_path=str(path))
         it.allocate_tensors()
         return it
+
+    # A missing delegate library or absent device is NOT the only way this goes wrong.
+    # load_delegate() below happily binds to a plain .tflite that was never run through
+    # edgetpu_compiler -- allocate_tensors() and invoke() then both succeed, with every
+    # op silently executing on the CPU. The caller would walk away believing they
+    # measured the Edge TPU. Catch that before the delegate ever binds.
+    if not is_edgetpu_compiled(path):
+        raise RuntimeError(
+            f"{path.name} was never compiled for the Edge TPU -- it has no "
+            f"'{EDGETPU_CUSTOM_OP.decode()}' op, so the Edge TPU delegate would still bind "
+            f"and every op would silently run on the CPU while this call claims to report "
+            f"a TPU run. Run `edgetpu_compiler` on the plain .tflite and pass the resulting "
+            f"*_edgetpu.tflite here instead.")
 
     lib = EDGETPU_LIB.get(platform.system())
     if lib is None:

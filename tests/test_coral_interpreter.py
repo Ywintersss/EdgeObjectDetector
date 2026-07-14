@@ -8,6 +8,7 @@ import interpreter as I  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CPU_MODEL = PROJECT_ROOT / "deploy" / "rpc_coarse17_int8_320.tflite"
+EDGETPU_MODEL = PROJECT_ROOT / "export" / "rpc_coarse17_int8_320_edgetpu.tflite"
 
 pytestmark = pytest.mark.skipif(
     not CPU_MODEL.exists(),
@@ -43,4 +44,26 @@ def test_requesting_the_tpu_without_one_fails_loudly_and_says_why():
     # There is no Edge TPU on the desktop. The failure must NAME the delegate, so that
     # on the board a real delegate problem is distinguishable from a missing model.
     with pytest.raises(RuntimeError, match="Edge TPU delegate"):
+        I.make_interpreter(CPU_MODEL, use_tpu=True)
+
+
+@pytest.mark.skipif(
+    not EDGETPU_MODEL.exists(),
+    reason=f"{EDGETPU_MODEL} missing -- run: edgetpu_compiler on the plain .tflite")
+def test_is_edgetpu_compiled_true_for_the_real_compiled_artifact():
+    assert I.is_edgetpu_compiled(EDGETPU_MODEL) is True
+
+
+def test_is_edgetpu_compiled_false_for_the_real_plain_artifact():
+    assert I.is_edgetpu_compiled(CPU_MODEL) is False
+
+
+def test_make_interpreter_refuses_an_uncompiled_model_on_the_tpu_path():
+    # CPU_MODEL is a plain .tflite -- never run through edgetpu_compiler. Requesting the
+    # TPU with it must be caught BEFORE the delegate binds, or every op silently runs on
+    # the CPU while the caller believes they measured the Edge TPU. The failure must name
+    # the real diagnosis (compilation), not merely "no delegate found" -- match on a
+    # substring that only the compilation-check message contains, so this test cannot
+    # pass vacuously via the pre-existing missing-delegate error.
+    with pytest.raises(RuntimeError, match="compiled"):
         I.make_interpreter(CPU_MODEL, use_tpu=True)
