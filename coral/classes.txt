@@ -1,0 +1,17 @@
+alcohol
+candy
+canned_food
+chocolate
+dessert
+dried_food
+dried_fruit
+drink
+gum
+instant_drink
+instant_noodles
+milk
+personal_hygiene
+puffed_food
+seasoner
+stationery
+tissue

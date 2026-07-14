@@ -50,3 +50,8 @@ calibration_image_sample_data_*.npy
 export/*.tflite
 deploy/*.tflite
 deploy/classes.txt
+
+# The COMPILED deployment artifacts are the release, not a rebuildable intermediate:
+# the board gets them in one `git clone`. 3.9 MB -- far inside GitHub's limits, no LFS.
+!coral/*_edgetpu.tflite
+!coral/classes.txt
