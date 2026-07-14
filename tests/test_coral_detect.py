@@ -35,6 +35,26 @@ def test_stage_timer_report_names_every_stage():
     assert "capture" in timer.report()
 
 
+def test_percentile_p90_uses_nearest_rank_not_naive_int_truncation():
+    # Nearest-rank p90 (ceil(0.9*n) - 1, 0-based) is unambiguous for 1..N ms samples.
+    # n=10 is the case the old `int(n * 0.9)` formula got wrong: it picked index 9 (the
+    # maximum, 10.0) instead of the correct index 8 (the 9th-of-10 value, 9.0).
+    assert DET._percentile([float(x) for x in range(1, 11)], 0.9) == 9.0    # n=10
+    assert DET._percentile([float(x) for x in range(1, 4)], 0.9) == 3.0     # n=3
+    assert DET._percentile([float(x) for x in range(1, 21)], 0.9) == 18.0   # n=20
+
+
+def test_stage_timer_p90_at_ten_samples_is_not_the_maximum():
+    # Same boundary, exercised through the public StageTimer.stats() path that the
+    # loop and the report actually use.
+    timer = DET.StageTimer()
+    for ms in range(1, 11):
+        timer.record("invoke", float(ms))
+    stats = timer.stats()
+    assert stats["invoke"]["n"] == 10
+    assert stats["invoke"]["p90_ms"] == 9.0
+
+
 def test_load_classes_reads_seventeen_names():
     names = DET.load_classes(CLASSES)
     assert len(names) == 17

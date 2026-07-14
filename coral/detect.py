@@ -10,11 +10,13 @@ cap it independently, and they call for opposite responses:
   2. The numpy decode chews 2100x21 values on that same modest CPU.
   3. JPEG-encoding each frame for the stream costs more A35 time.
   4. The USB webcam on a bandwidth-limited OTG port may simply not deliver frames faster.
-"22 FPS" is consistent with all four and distinguishes none of them. So we time five
-stages separately, and separately micro-benchmark invoke() alone.
+"22 FPS" is consistent with all four and distinguishes none of them. So we time six
+stages separately (capture, preprocess, invoke, decode, draw, sink), and separately
+micro-benchmark invoke() alone.
 """
 
 import argparse
+import math
 import statistics
 import sys
 import time
@@ -30,7 +32,23 @@ import sinks as S
 
 HERE = Path(__file__).resolve().parent
 EXPECTED_CLASSES = 17
-IMGSZ = 320
+
+
+def _percentile(ordered_samples: list[float], fraction: float) -> float:
+    """Nearest-rank percentile over an already-sorted list (e.g. fraction=0.9 -> p90).
+
+    Nearest rank, 1-based: rank = ceil(fraction * n), 0-based index = rank - 1. Unlike
+    the naive `int(n * fraction)`, this does NOT pick one rank too high when n is exactly
+    divisible by 1/fraction -- e.g. at n=10, int(10*0.9)=9 (0-based) selects the maximum
+    and mislabels it p90; ceil(0.9*10)-1=8 selects the correct 9th-of-10 value.
+    """
+    n = len(ordered_samples)
+    if n == 0:
+        raise ValueError("cannot take a percentile of zero samples")
+    if n == 1:
+        return ordered_samples[0]
+    index = min(max(math.ceil(fraction * n) - 1, 0), n - 1)
+    return ordered_samples[index]
 
 
 class StageTimer:
@@ -56,10 +74,9 @@ class StageTimer:
         out = {}
         for stage, samples in self._samples.items():
             ordered = sorted(samples)
-            p90_index = min(int(len(ordered) * 0.9), len(ordered) - 1)
             out[stage] = {
                 "median_ms": statistics.median(ordered),
-                "p90_ms": ordered[p90_index],
+                "p90_ms": _percentile(ordered, 0.9),
                 "n": len(ordered),
             }
         return out
@@ -168,8 +185,7 @@ def benchmark_invoke(detector: Detector, frame, runs: int = 50) -> dict:
             samples.append(elapsed_ms)
 
     ordered = sorted(samples)
-    p90_index = min(int(len(ordered) * 0.9), len(ordered) - 1)
-    return {"median_ms": statistics.median(ordered), "p90_ms": ordered[p90_index],
+    return {"median_ms": statistics.median(ordered), "p90_ms": _percentile(ordered, 0.9),
             "n": len(ordered)}
 
 
@@ -203,7 +219,8 @@ def run_loop(detector, cap, names, conf, iou, built_sinks, timer) -> int:
             timer.record(stage, ms)
 
         try:
-            frame = draw_detections(frame, detections, names)
+            with timer.time("draw"):
+                frame = draw_detections(frame, detections, names)
         except ValueError as exc:
             print(f"ERROR: cannot label detections: {exc}", file=sys.stderr)
             return 1
@@ -260,17 +277,28 @@ def main() -> int:
     if args.image:
         return run_still(detector, args.image, names, args.conf, args.iou)
 
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        cap.release()
-        print(f"ERROR: could not open camera {args.camera}. Run probe_board.py to see "
-              f"whether the OTG webcam enumerated at all.", file=sys.stderr)
+    # Build the sinks BEFORE opening the camera: MjpegSink binds a socket synchronously
+    # and a stale detect.py still holding the port raises OSError. If that happened
+    # after the camera was opened, the webcam would stay locked until physically
+    # replugged -- painful on a headless board reached only over Wi-Fi.
+    try:
+        built = S.build_sinks(args.display, args.port)
+    except OSError as exc:
+        print(f"ERROR: could not start display/stream on port {args.port}: {exc}",
+              file=sys.stderr)
         return 1
-
-    built = S.build_sinks(args.display, args.port)
     for sink in built:
         if isinstance(sink, S.MjpegSink):
             print(f"Streaming at http://<board-ip>:{sink.port}/  (Ctrl-C to stop)")
+
+    cap = cv2.VideoCapture(args.camera)
+    if not cap.isOpened():
+        cap.release()
+        for sink in built:
+            sink.close()
+        print(f"ERROR: could not open camera {args.camera}. Run probe_board.py to see "
+              f"whether the OTG webcam enumerated at all.", file=sys.stderr)
+        return 1
     print("POINT THE CAMERA DOWN at products on a plain surface.")
 
     timer = StageTimer()

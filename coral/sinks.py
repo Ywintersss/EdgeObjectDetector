@@ -86,7 +86,7 @@ class MjpegSink:
 
     def publish(self, frame) -> None:
         # Encode once, here, rather than once per connected client. On a Cortex-A35 this
-        # encode is a real cost -- it is one of the five stages the runner times.
+        # encode is a real cost -- it is one of the six stages the runner times.
         ok, buf = cv2.imencode(".jpg", frame)
         if not ok:
             raise RuntimeError("cv2.imencode failed to encode the annotated frame")
