@@ -147,3 +147,30 @@ def test_decode_keeps_overlapping_boxes_of_DIFFERENT_classes():
 
     dets = D.decode(out, OUT_QUANT, ratio=1.0, pad=(0, 0), size=SIZE)
     assert sorted(d["cls"] for d in dets) == [3, 9]
+
+
+def test_decode_maps_each_box_channel_to_the_right_axis():
+    # Plant ONE anchor: an ASYMMETRIC, OFF-CENTRE box with distinct channel values.
+    # Every existing test uses a centred square (cx == cy == 0.5, w == h == 0.5),
+    # so a cx/cy or w/h channel swap would have passed all of them silently.
+    # This test uses cx=0.25, cy=0.75, w=0.6, h=0.2 (all different) to catch any
+    # permutation of the four box channels.
+    out = _empty_output()
+    anchor = 500
+    for channel, value in ((0, 0.25), (1, 0.75), (2, 0.6), (3, 0.2)):  # cx, cy, w, h
+        out[0, channel, anchor] = _quantize(value)
+    out[0, 4 + 11, anchor] = _quantize(0.85)  # class 11
+
+    dets = D.decode(out, OUT_QUANT, ratio=1.0, pad=(0, 0), size=SIZE)
+
+    assert len(dets) == 1
+    assert dets[0]["cls"] == 11
+    assert dets[0]["conf"] == pytest.approx(0.85, abs=0.01)
+    x1, y1, x2, y2 = dets[0]["box"]
+    # cx=0.25, cy=0.75, w=0.6, h=0.2 (normalized) with size=320:
+    #   cx_px = 80, cy_px = 240, w_px = 192, h_px = 64
+    #   x1 = cx_px - w_px/2 = 80 - 96 = -16
+    #   y1 = cy_px - h_px/2 = 240 - 32 = 208
+    #   x2 = cx_px + w_px/2 = 80 + 96 = 176
+    #   y2 = cy_px + h_px/2 = 240 + 32 = 272
+    assert (x1, y1, x2, y2) == pytest.approx((-16, 208, 176, 272), abs=2)
