@@ -41,12 +41,17 @@ def test_letterbox_leaves_a_square_frame_unpadded():
     assert ratio == pytest.approx(0.5)
 
 
-def test_quantize_input_maps_white_to_the_top_of_the_int8_range():
+def test_quantize_input_truncates_like_ultralytics_rather_than_rounding():
+    # White lands on 126, NOT 127 -- and that is deliberate. The model's scale is a hair
+    # ABOVE 1/255, so 1.0 / scale = 254.99998, + (-128) = 126.99998. Ultralytics casts
+    # with .astype (which truncates) -> 126. Rounding would give 127.
+    # We match Ultralytics byte-for-byte because every accuracy number we have for this
+    # model was measured through ITS pipeline. See quantize_input's docstring.
     white = np.full((SIZE, SIZE, 3), 255, dtype=np.uint8)
     q = D.quantize_input(white, scale=0.003921568859368563, zero_point=-128)
     assert q.shape == (1, SIZE, SIZE, 3)
     assert q.dtype == np.int8
-    assert (q == 127).all()          # 1.0 / (1/255) + (-128) = 127
+    assert (q == 126).all()
 
 
 def test_quantize_input_maps_black_to_the_zero_point():
@@ -61,7 +66,7 @@ def test_quantize_input_converts_bgr_to_rgb():
     frame = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
     frame[..., 0] = 255                                  # BGR blue
     q = D.quantize_input(frame, scale=0.003921568859368563, zero_point=-128)
-    assert (q[0, :, :, 2] == 127).all()                  # RGB channel 2 == blue
+    assert (q[0, :, :, 2] == 126).all()                  # RGB channel 2 == blue (126: truncated)
     assert (q[0, :, :, 0] == -128).all()
 
 

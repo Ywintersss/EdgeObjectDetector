@@ -46,11 +46,22 @@ def quantize_input(letterboxed_bgr, scale, zero_point, dtype=np.int8):
 
     scale/zero_point MUST come from the interpreter's input details at runtime, never
     from a constant: they are a property of the exported artifact, not of the code.
+
+    TRUNCATES rather than rounds, matching Ultralytics byte-for-byte
+    (nn/backends/litert.py: `im = (im / scale + zero_point).astype(dtype)`; .astype
+    truncates). Rounding is arguably the more correct quantizer, and it was tried -- but
+    the model's scale is a hair above 1/255, so `pixel / 255 / scale` lands just under the
+    integer and the two disagree on ~0.1% of pixels. That was enough to shift whole boxes
+    by a full output quantization step (~10 px in a 1834 px frame). Every accuracy number
+    we have for this model -- mAP@50 0.978 -- was measured through Ultralytics' pipeline,
+    so the board must reproduce THAT pipeline, not a variant we never evaluated. Verified:
+    this yields a bit-identical input tensor (0 of 307,200 pixels differ).
     """
     rgb = cv2.cvtColor(letterboxed_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     info = np.iinfo(dtype)
-    q = np.round(rgb / scale) + zero_point
-    return np.clip(q, info.min, info.max).astype(dtype)[None]
+    # Clip before the cast: an out-of-range float would WRAP under .astype (Ultralytics
+    # does not clip; it is safe there only because its inputs are already in range).
+    return np.clip(rgb / scale + zero_point, info.min, info.max).astype(dtype)[None]
 
 
 def nms(boxes, scores, iou_threshold):
