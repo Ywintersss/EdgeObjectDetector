@@ -7,6 +7,9 @@ deep inside the detect loop.
     python3 probe_board.py
 """
 
+from __future__ import annotations
+
+import platform
 import sys
 from pathlib import Path
 
@@ -21,6 +24,18 @@ def check(label: str, fn) -> bool:
         return False
     print(f"  ok    {label}: {detail}")
     return True
+
+
+def _python_version():
+    # Mendel is Debian 10 -> Python 3.7. Every coral/*.py module relies on
+    # `from __future__ import annotations` (PEP 563, available since 3.7.0) to defer
+    # annotation evaluation; older interpreters would die at import instead of here.
+    # Check this FIRST: it is the class of failure that sent us back to fix this probe.
+    if sys.version_info < (3, 7):
+        raise RuntimeError(
+            f"Python {platform.python_version()} is too old -- coral/*.py requires "
+            f"Python 3.7+ (needs `from __future__ import annotations`, PEP 563)")
+    return f"Python {platform.python_version()}"
 
 
 def _numpy():
@@ -79,6 +94,7 @@ def _camera():
 def main() -> int:
     print("Coral Dev Board Mini -- probing the foundations\n")
     results = [
+        check("Python version", _python_version),
         check("numpy", _numpy),
         check("opencv (sudo apt-get install python3-opencv)", _opencv),
         check("model present", _model),

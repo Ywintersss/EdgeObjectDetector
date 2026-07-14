@@ -70,6 +70,14 @@ def test_quantize_input_converts_bgr_to_rgb():
     assert (q[0, :, :, 0] == -128).all()
 
 
+def test_quantize_input_rejects_an_already_normalized_float_frame():
+    # A float frame already in 0..1 would otherwise be divided by 255 a second time,
+    # silently producing a near-zero input tensor with no error.
+    float_frame = np.zeros((SIZE, SIZE, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="uint8"):
+        D.quantize_input(float_frame, scale=0.003921568859368563, zero_point=-128)
+
+
 def test_nms_suppresses_a_heavily_overlapping_box():
     boxes = np.array([[0, 0, 10, 10], [1, 1, 11, 11]], dtype=np.float32)
     scores = np.array([0.9, 0.8], dtype=np.float32)

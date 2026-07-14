@@ -2,7 +2,10 @@
 
     python3 detect.py                          # TPU + webcam + MJPEG stream on :8080
     python3 detect.py --display both           # ...and an HDMI window if Mendel allows one
-    python3 detect.py --cpu --image shot.jpg   # desktop dry-run: no TPU, no camera
+    python3 detect.py --cpu --model ../deploy/rpc_coarse17_int8_320.tflite \
+        --image shot.jpg                       # desktop dry-run: no TPU, no camera
+        # The plain CPU model is not part of the board bundle -- it is produced on a
+        # dev machine with `python export_int8.py --bundle 320`.
 
 WHY THE STAGE TIMINGS EXIST. A single FPS number would mislead you. Four things can each
 cap it independently, and they call for opposite responses:
@@ -14,6 +17,8 @@ cap it independently, and they call for opposite responses:
 stages separately (capture, preprocess, invoke, decode, draw, sink), and separately
 micro-benchmark invoke() alone.
 """
+
+from __future__ import annotations
 
 import argparse
 import math
@@ -225,9 +230,13 @@ def run_loop(detector, cap, names, conf, iou, built_sinks, timer) -> int:
             print(f"ERROR: cannot label detections: {exc}", file=sys.stderr)
             return 1
 
-        with timer.time("sink"):
-            for sink in built_sinks:
-                sink.publish(frame)
+        try:
+            with timer.time("sink"):
+                for sink in built_sinks:
+                    sink.publish(frame)
+        except RuntimeError as exc:
+            print(f"ERROR: could not publish frame to a sink: {exc}", file=sys.stderr)
+            return 1
 
         if any(getattr(s, "should_quit", lambda: False)() for s in built_sinks):
             return 0

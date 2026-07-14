@@ -34,15 +34,6 @@ def test_mjpeg_sink_serves_a_published_frame_as_a_jpeg(frame):
         sink.close()
 
 
-def test_mjpeg_sink_url_names_the_bound_port(frame):
-    sink = S.MjpegSink(port=0)
-    try:
-        assert sink.url.startswith("http://")
-        assert str(sink.port) in sink.url
-    finally:
-        sink.close()
-
-
 def test_hdmi_sink_degrades_instead_of_crashing_when_no_display(monkeypatch, frame):
     # Mendel runs Wayland; OpenCV's imshow is built against GTK/X11 and may refuse to open
     # a window. That must cost us the WINDOW, never the RUN -- the MJPEG stream is still

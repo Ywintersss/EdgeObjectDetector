@@ -11,7 +11,7 @@ import detect as DET  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CPU_MODEL = PROJECT_ROOT / "deploy" / "rpc_coarse17_int8_320.tflite"
 REAL_IMAGES = PROJECT_ROOT / "dataset_real" / "images" / "real_eval"
-CLASSES = PROJECT_ROOT / "deploy" / "classes.txt"
+CLASSES = PROJECT_ROOT / "coral" / "classes.txt"
 
 
 def test_stage_timer_records_medians_per_stage():

@@ -8,7 +8,7 @@ import interpreter as I  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CPU_MODEL = PROJECT_ROOT / "deploy" / "rpc_coarse17_int8_320.tflite"
-EDGETPU_MODEL = PROJECT_ROOT / "export" / "rpc_coarse17_int8_320_edgetpu.tflite"
+EDGETPU_MODEL = PROJECT_ROOT / "coral" / "rpc_coarse17_int8_320_edgetpu.tflite"
 
 pytestmark = pytest.mark.skipif(
     not CPU_MODEL.exists(),

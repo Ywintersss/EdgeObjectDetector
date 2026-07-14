@@ -10,6 +10,8 @@ Runtime preference order: tflite_runtime (what PyCoral installs on Mendel) -> ai
 (the desktop runtime) -> tensorflow.lite. Whichever is present wins.
 """
 
+from __future__ import annotations
+
 import platform
 from pathlib import Path
 

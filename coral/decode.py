@@ -15,6 +15,8 @@ format for which Ultralytics rescales them out of pixel units. That is the Phase
 would be wrong -- which is exactly why export_int8.py refuses to produce one.
 """
 
+from __future__ import annotations
+
 import cv2
 import numpy as np
 
@@ -57,6 +59,11 @@ def quantize_input(letterboxed_bgr, scale, zero_point, dtype=np.int8):
     so the board must reproduce THAT pipeline, not a variant we never evaluated. Verified:
     this yields a bit-identical input tensor (0 of 307,200 pixels differ).
     """
+    if letterboxed_bgr.dtype != np.uint8:
+        raise ValueError(
+            f"quantize_input expects a BGR uint8 frame, got dtype {letterboxed_bgr.dtype} "
+            f"-- this looks like an already-normalized float frame; dividing it by 255 "
+            f"again would silently produce a near-zero input with no error")
     rgb = cv2.cvtColor(letterboxed_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     info = np.iinfo(dtype)
     # Clip before the cast: an out-of-range float would WRAP under .astype (Ultralytics

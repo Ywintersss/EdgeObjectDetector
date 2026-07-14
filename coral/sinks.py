@@ -9,6 +9,8 @@ is built against GTK/X11, so the window may simply refuse to open. Losing the wi
 never lose the run.
 """
 
+from __future__ import annotations
+
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -64,10 +66,6 @@ class MjpegSink:
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-
-    @property
-    def url(self) -> str:
-        return f"http://0.0.0.0:{self.port}/"
 
     def _wait_for_new_frame(self, last_seq: int):
         """Block until a frame newer than `last_seq` is published, or the sink closes.

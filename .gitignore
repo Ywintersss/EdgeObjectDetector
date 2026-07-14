@@ -53,5 +53,5 @@ deploy/classes.txt
 
 # The COMPILED deployment artifacts are the release, not a rebuildable intermediate:
 # the board gets them in one `git clone`. 3.9 MB -- far inside GitHub's limits, no LFS.
-!coral/*_edgetpu.tflite
+!coral/rpc_coarse17_int8_320_edgetpu.tflite
 !coral/classes.txt
