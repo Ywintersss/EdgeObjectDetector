@@ -96,3 +96,63 @@ def test_benchmark_invoke_discards_the_warmup_call():
 
     assert result["n"] == 4          # 5 runs, first one dropped as warm-up
     assert result["median_ms"] > 0.0
+
+
+def test_run_loop_times_all_six_stages_including_draw():
+    """draw_detections was untimed until recently; nothing guards it from silently
+    regressing. Assert that all six stages are recorded, with draw explicitly named."""
+
+    class _FakeDetector:
+        """Minimal detector: detect() returns one detection and timing dict."""
+        def detect(self, frame, conf, iou):
+            detections = [{"cls": 0, "conf": 0.9, "box": (10, 10, 50, 50)}]
+            timings = {"preprocess": 1.0, "invoke": 2.0, "decode": 0.5}
+            return detections, timings
+
+    class _LoopCap:
+        """Yields the same frame repeatedly."""
+        def __init__(self):
+            self._frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+        def read(self):
+            return True, self._frame.copy()
+
+        def release(self):
+            pass
+
+    class _QuitAfterTwoSink:
+        """Publishes frames and signals quit after two frames."""
+        def __init__(self):
+            self._count = 0
+            self.published_frames = []
+
+        def publish(self, frame):
+            self._count += 1
+            self.published_frames.append(frame.copy())
+
+        def should_quit(self):
+            return self._count >= 2
+
+        def close(self):
+            pass
+
+    names = ["class_0", "class_1"]
+    detector = _FakeDetector()
+    cap = _LoopCap()
+    sink = _QuitAfterTwoSink()
+    timer = DET.StageTimer()
+
+    rc = DET.run_loop(detector, cap, names, conf=0.25, iou=0.45,
+                      built_sinks=[sink], timer=timer)
+
+    assert rc == 0, "run_loop should return 0 on clean quit via should_quit()"
+    assert len(sink.published_frames) == 2, "both frames should have been published"
+
+    stats = timer.stats()
+    required_stages = {"capture", "preprocess", "invoke", "decode", "draw", "sink"}
+    assert required_stages <= set(stats), (
+        f"Missing stages in timer.stats(). "
+        f"Expected: {required_stages}. "
+        f"Got: {set(stats)}. "
+        f"draw_detections must be timed, or its A35 cost vanishes from the accounting "
+        f"and the reported FPS over-states the board.")
