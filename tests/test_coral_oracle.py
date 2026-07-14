@@ -56,10 +56,14 @@ REAL_IMAGES = PROJECT_ROOT / "dataset_real" / "images" / "real_eval"
 CONF = 0.25
 IOU = 0.45
 SIZE = 320
+# 5 images keeps the test fast. The thresholds below were calibrated on 30 (195
+# detections) -- do not read them as derived from a 5-image run.
 N_IMAGES = 5
 
 MIN_MEDIAN_IOU = 0.95    # measured 0.9958 over 195 detections
-MIN_BOX_IOU = 0.70       # measured min 0.790; a transposed axis scores ~0.0
+MIN_BOX_IOU = 0.70       # HEADROOM, not the measured value: worst observed was 0.790.
+                         # A transposed axis or a skipped un-letterboxing scores ~0.0,
+                         # so the floor has room to spare and still catches them.
 
 pytest.importorskip("ultralytics")
 pytestmark = pytest.mark.skipif(
