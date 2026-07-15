@@ -24,6 +24,7 @@ import argparse
 import math
 import statistics
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -211,6 +212,58 @@ def run_still(detector, image_path, names, conf, iou) -> int:
     return 0
 
 
+class FrameGrabber:
+    """Read the camera on a background thread, keeping ONLY the most recent frame.
+
+    On the Mini the detect loop runs several times slower than the 30 fps camera, and cv2's
+    VideoCapture hands back the OLDEST queued frame -- so a slow consumer falls further and
+    further behind and the displayed latency grows without bound (you watch the past).
+    Draining the queue here and always returning the latest frame pins latency at ~one
+    frame, constant, however slow the loop is. Nothing useful is lost: the frames it skips
+    are exactly the stale ones the loop could never have caught up on.
+
+    It exposes the same read()/release() surface as cv2.VideoCapture, so the loop is
+    unchanged -- it just receives a grabber instead of the raw capture.
+    """
+
+    def __init__(self, cap):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._ok = False
+        self._frame = None
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        # Prime one frame synchronously so the very first read() can never lose the startup
+        # race and return None (which the loop would read as a dropped camera).
+        self._ok, self._frame = self._cap.read()
+        self._running = True
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+        return self
+
+    def _pump(self):
+        while self._running:
+            ok, frame = self._cap.read()
+            with self._lock:
+                self._ok, self._frame = ok, frame
+            if not ok:                       # camera dropped -- stop pulling
+                break
+
+    def read(self):
+        """-> (ok, frame): the newest frame the background thread has captured."""
+        with self._lock:
+            return self._ok, self._frame
+
+    def release(self):
+        """Stop the background thread, then release the underlying capture."""
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._cap.release()
+
+
 def run_loop(detector, cap, names, conf, iou, built_sinks, timer) -> int:
     while True:
         with timer.time("capture"):
@@ -340,14 +393,19 @@ def main() -> int:
     print(f"POINT THE CAMERA DOWN at products on a plain surface. "
           f"({args.fourcc} {args.width}x{args.height})")
 
+    # Pull frames on a background thread so a loop slower than the camera never accumulates
+    # a queue of stale frames -- without this, the displayed latency grows without bound on
+    # the Mini (see FrameGrabber). The grabber owns the camera from here on.
+    frames = FrameGrabber(cap).start()
+
     timer = StageTimer()
     rc = 1
     try:
-        rc = run_loop(detector, cap, names, args.conf, args.iou, built, timer)
+        rc = run_loop(detector, frames, names, args.conf, args.iou, built, timer)
     except KeyboardInterrupt:
         rc = 0
     finally:
-        cap.release()
+        frames.release()          # stops the grabber thread AND releases the camera
         for sink in built:
             sink.close()
         if timer.stats():

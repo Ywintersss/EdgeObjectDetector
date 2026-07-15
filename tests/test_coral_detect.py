@@ -98,6 +98,66 @@ def test_benchmark_invoke_discards_the_warmup_call():
     assert result["median_ms"] > 0.0
 
 
+def test_frame_grabber_keeps_only_the_latest_frame_no_backlog():
+    """The anti-lag guarantee: a consumer slower than the camera must receive the NEWEST
+    frame, never a stale queued one. FrameGrabber drains on a background thread, so read()
+    must return the most recent frame the camera produced -- not the first one queued."""
+    import threading
+    import time
+
+    class _CountingCap:
+        """Emits frames tagged 0,1,2,... then holds on the last one."""
+        def __init__(self, n):
+            self.n = n
+            self._i = 0
+            self.produced_all = threading.Event()
+
+        def read(self):
+            if self._i < self.n:
+                frame = np.full((4, 4, 3), self._i % 256, dtype=np.uint8)
+                self._i += 1
+                if self._i >= self.n:
+                    self.produced_all.set()
+                return True, frame
+            time.sleep(0.005)                          # pace the thread; hold the last frame
+            return True, np.full((4, 4, 3), (self.n - 1) % 256, dtype=np.uint8)
+
+        def release(self):
+            pass
+
+    cap = _CountingCap(n=20)
+    grabber = DET.FrameGrabber(cap).start()
+    try:
+        assert cap.produced_all.wait(1.0), "the fake camera never finished producing"
+        time.sleep(0.02)                               # let the grabber store the last frame
+        ok, frame = grabber.read()
+        assert ok
+        assert int(frame[0, 0, 0]) == 19, (            # latest (n-1), NOT frame 0
+            "FrameGrabber handed out a stale frame -- exactly the backlog it exists to kill")
+    finally:
+        grabber.release()
+
+
+def test_frame_grabber_release_stops_the_thread_and_frees_the_camera():
+    import time
+
+    class _IdleCap:
+        released = False
+
+        def read(self):
+            time.sleep(0.002)
+            return True, np.zeros((4, 4, 3), dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    cap = _IdleCap()
+    grabber = DET.FrameGrabber(cap).start()
+    grabber.release()
+    assert not grabber._thread.is_alive(), "release() must join the background thread"
+    assert cap.released, "release() must release the underlying capture"
+
+
 def test_run_loop_times_all_six_stages_including_draw():
     """draw_detections was untimed until recently; nothing guards it from silently
     regressing. Assert that all six stages are recorded, with draw explicitly named."""
