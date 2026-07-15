@@ -247,6 +247,13 @@ def main() -> int:
     p.add_argument("--model", default=None, help="default: the right model in coral/")
     p.add_argument("--classes", default=str(HERE / "classes.txt"))
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--width", type=int, default=320,
+                   help="capture width (default 320). The Coral Mini's MUSB OTG port has a "
+                        "hard USB isochronous-bandwidth limit; 320x240 is what reliably fits.")
+    p.add_argument("--height", type=int, default=240, help="capture height (default 240)")
+    p.add_argument("--fourcc", default="YUYV",
+                   help="capture pixel format (default YUYV). MJPG and larger frames exceed "
+                        "the Mini's MUSB bandwidth and fail STREAMON with ENOSPC (errno 28).")
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--iou", type=float, default=0.45)
     p.add_argument("--display", default="stream", choices=["stream", "hdmi", "both"])
@@ -301,6 +308,14 @@ def main() -> int:
             print(f"Streaming at http://<board-ip>:{sink.port}/  (Ctrl-C to stop)")
 
     cap = cv2.VideoCapture(args.camera)
+    # Request the capture format BEFORE the first read. On the Coral Mini the MUSB OTG
+    # controller cannot reserve the isochronous USB bandwidth for MJPG or for frames much
+    # above 320x240 -- STREAMON then fails with ENOSPC. YUYV 320x240 is the largest stream
+    # it will host, and the 320x320-input model downsamples anyway, so nothing is lost.
+    # Order matters: fourcc first, then the frame size.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     if not cap.isOpened():
         cap.release()
         for sink in built:
@@ -308,7 +323,22 @@ def main() -> int:
         print(f"ERROR: could not open camera {args.camera}. Run probe_board.py to see "
               f"whether the OTG webcam enumerated at all.", file=sys.stderr)
         return 1
-    print("POINT THE CAMERA DOWN at products on a plain surface.")
+    # isOpened() is not enough on the Mini: the device opens, then STREAMON fails if the
+    # requested format overruns the MUSB bandwidth. Prove we can pull one real frame before
+    # committing to the loop -- otherwise the failure surfaces as a confusing mid-loop drop.
+    ok, _ = cap.read()
+    if not ok:
+        cap.release()
+        for sink in built:
+            sink.close()
+        print(f"ERROR: camera {args.camera} opened but could not stream at "
+              f"{args.fourcc} {args.width}x{args.height}. The Mini's MUSB OTG port has a "
+              f"hard USB-bandwidth ceiling -- MJPG and resolutions above ~320x240 fail here "
+              f"with ENOSPC. Lower --width/--height, or check the uvcvideo FIX_BANDWIDTH "
+              f"quirk (see coral/README.md).", file=sys.stderr)
+        return 1
+    print(f"POINT THE CAMERA DOWN at products on a plain surface. "
+          f"({args.fourcc} {args.width}x{args.height})")
 
     timer = StageTimer()
     rc = 1
